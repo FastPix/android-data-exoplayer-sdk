@@ -14,12 +14,24 @@ android {
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles "consumer-rules.pro"
+
+        buildFeatures {
+            buildConfig true
+        }
+        buildConfigField "String", "LIBRARY_VERSION", "\"${LIBRARY_VERSION}\""
+
     }
 
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            buildConfigField "String", "LIBRARY_VERSION", "\"${LIBRARY_VERSION}\""
+
+        }
+        debug{
+            buildConfigField "String", "LIBRARY_VERSION", "\"${LIBRARY_VERSION}\""
+
         }
     }
     compileOptions {
@@ -41,7 +53,6 @@ dependencies {
     androidTestImplementation libs.espresso.core
 
     api 'androidx.test.espresso:espresso-core:3.6.1'
-    api 'com.google.ads.interactivemedia.v3:interactivemedia:3.36.0'
     api 'com.google.android.exoplayer:exoplayer-core:2.19.1'
     api 'com.google.android.exoplayer:exoplayer-dash:2.19.1'
     api 'com.google.android.exoplayer:exoplayer-ui:2.19.1'
@@ -49,7 +60,8 @@ dependencies {
 
     api 'com.google.android.exoplayer:exoplayer:2.19.1'
     api 'com.google.android.exoplayer:extension-cast:2.19.1'
-    api 'io.fastpix.data:core-sdk:1.0.0'
+    api 'io.fastpix.data:core-sdk:1.0.2'
+    api 'com.google.code.gson:gson:2.10.1'
 
 }
 publishing {
@@ -58,7 +70,7 @@ publishing {
 
             publication.setGroupId("io.fastpix.data")
             publication.setArtifactId("exo-player")
-            publication.setVersion("1.0.0")
+            publication.setVersion("1.0.2")
 
 
             publication.artifact("$buildDir/outputs/aar/library-release.aar")
@@ -79,12 +91,14 @@ publishing {
     }
     repositories {
         maven {
-            name ="GithubPackages"
+            name = "GithubPackages"
             url = uri("https://maven.pkg.github.com/FastPix/android-data-exoplayer-sdk")
-            credentials{
+            credentials {
                 username = project.findProperty("gpr.user") ?: ""
                 password = project.findProperty("gpr.key") ?: ""
             }
+
         }
+
     }
 }

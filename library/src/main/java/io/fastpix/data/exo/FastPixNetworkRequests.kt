@@ -41,7 +41,6 @@ class FastPixNetworkRequests : RequestHandler {
     private class NetworkTaskRunner(private val callback: IFPNetworkRequestsCompletion?) :
         AsyncTask<NetworkRequest, Void, Boolean>() {
         private var failureCount = 0
-
         private fun getNextBeaconTime(): Long {
             return if (failureCount == 0) 0 else ((2.0.pow(failureCount - 1) * Math.random()).toLong() + 1) * BASE_TIME_BETWEEN_BEACONS
         }
@@ -85,14 +84,13 @@ class FastPixNetworkRequests : RequestHandler {
                     outputStream.write(request.body?.toByteArray())
                     outputStream.close()
                 }
-
                 conn.connect()
                 stream = conn.inputStream
             } catch (e: IOException) { // Handles network, file, and stream issues
                 AnalyticsEventLogger.d(TAG, "Network or file error: ${e.message}")
                 successful = false
                 failureCount++
-            }  finally {
+            } finally {
                 try {
                     stream?.close()
                     conn?.disconnect()

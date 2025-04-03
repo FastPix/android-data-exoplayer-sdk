@@ -46,7 +46,7 @@ repositories {
 Add the FastPix Data Core SDK dependencie to your **build.gradle**:
 ```gradle
 dependencies {
-    implementation 'io.fastpix.data:exo-player-sdk:1.0.0'
+    implementation 'io.fastpix.data:exo-player:1.0.2'
 }
 ```
 
@@ -95,7 +95,8 @@ override fun onCreate(savedInstanceState: Bundle?) {
         ||        ||             || 
         ||        ||             ||    
     customDataEntity.customData10 = "data10" 
-        
+
+/* You need to pass the view session ID which is only used with CMCD, if not used CMCd you need to create empty CustomerViewDataEntity*/ 
     val customerViewDataEntity = CustomerViewDataEntity() 
     customerViewDataEntity.viewSessionId = UUID.randomUUID().toString() 
     
@@ -105,9 +106,9 @@ override fun onCreate(savedInstanceState: Bundle?) {
     customerVideoDataEntity, 
     customerViewDataEntity) 
 
-// customOptions set customized Domain 
+// customOptions set customized Domain or else create empty CustomOptions
     val customOptions = CustomOptions() 
-    customOptions.beaconDomain = "domain.com" 
+    customOptions.beaconDomain = "domain.com" //by defalt set up with "metrix.ws"
 } 
 ```
 
