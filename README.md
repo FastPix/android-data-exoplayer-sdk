@@ -144,8 +144,8 @@ Finally, when destroying the player, make sure to call the FastPixBaseExoPlayer.
 
 ```kotlin
     override fun onDestroy() { 
-      super.onDestroy() 
-      fastPixBaseExoPlayer.release() // Cleanup FastPix tracking 
+      super.onDestroy()
+      fastPixDataSDK.release() // Cleanup FastPix tracking 
     } 
 ```
 
