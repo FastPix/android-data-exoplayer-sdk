@@ -66,7 +66,7 @@ import ...
 
 class VideoPlayerActivity : AppCompatActivity() { 
     private lateinit var exoPlayer: ExoPlayer // Global ExoPlayer instance 
-    private lateinit var fastPixBaseExoPlayer: FastPixBaseExoPlayer // Global FastPix instance 
+    private lateinit var fastPixDataSDK: FastPixBaseExoPlayer // Global FastPix instance 
 } 
 ```
 
@@ -86,7 +86,7 @@ class VideoPlayerActivity : AppCompatActivity() {
         val videoDataDetails =
                 VideoDataDetails(
                     UUID.randomUUID().toString(),
-                    videoModel?.id
+                    "Video Title"
                 ).apply {
                     videoSeries = "This is video series"
                     videoProducer = "This is video Producer"
