@@ -39,8 +39,8 @@ repositories {
   maven {
     url = uri("https://maven.pkg.github.com/FastPix/android-data-exo-player-sdk")
     credentials {
-        username = "Github_User_Name"  // Your Github account user name 
-        password = "Github_PAT" // Your (PAT) Personal access token Get It from you Github account 
+        username = "github-user-name" 
+        password = "github-password"
     }
   }
 }
@@ -48,7 +48,7 @@ repositories {
 Add the FastPix Data Core SDK dependencie to your **build.gradle**:
 ```gradle
 dependencies {
-    implementation 'io.fastpix.data:exoplayer:1.0.0'
+    implementation 'io.fastpix.data:exoplayer:1.1.0'
 }
 ```
 
@@ -61,7 +61,7 @@ Make sure ExoPlayer is installed and integrated with your project as part of the
 Integrate the following Kotlin code into your application to configure Exoplayer Player with FastPix.
 
 ### Globally declare
-``` Kotlin
+```Kotlin
 import ... 
 
 class VideoPlayerActivity : AppCompatActivity() { 
@@ -74,108 +74,79 @@ class VideoPlayerActivity : AppCompatActivity() {
 **workspace_id** is the only mandatory field. Providing additional metadata can greatly enhance analytics and reporting.  
 
 **CustomerData and CustomOptions :** Create the CustomerPlayerData and CustomerVideoData objects as appropriate for your current playback 
-``` Kotlin
-override fun onCreate(savedInstanceState: Bundle?) { 
-    val customerPlayerDataEntity = CustomerPlayerDataEntity() 
-    customerPlayerDataEntity.workspaceKey = Constants.wsKey 
-    customerPlayerDataEntity.playerName = "Exoplayer" 
- 
-/* Data about this video Add or change properties here to customize video metadata such as title,language, etc */ 
-    val customerVideoDataEntity = CustomerVideoDataEntity() 
-    customerVideoDataEntity.videoId = “id” 
-    customerVideoDataEntity.videoTitle = “title” 
-    customerVideoDataEntity.videoSourceUrl = “urlSting” 
-    customerVideoDataEntity.videoLanguageCode = "Lang" 
-    customerVideoDataEntity.videoProducer = "Producer" 
-    customerVideoDataEntity.videoContentType = “itemType” 
- 
-/* Add values for your Custom Dimensions. Up to 10 strings can be set to track your own data */ 
-    val customDataEntity = CustomDataEntity()
-    customDataEntity.customData1 = "data1" 
-    customDataEntity.customData2 = "data2" 
-    customDataEntity.customData3 = "data3" 
-        ||        ||             || 
-        ||        ||             ||    
-    customDataEntity.customData10 = "data10" 
-
-/* You need to pass the view session ID which is only used with CMCD, if not used CMCd you need to create empty CustomerViewDataEntity*/ 
-    val customerViewDataEntity = CustomerViewDataEntity() 
-    customerViewDataEntity.viewSessionId = UUID.randomUUID().toString() 
+```Kotlin
+    override fun onCreate(savedInstanceState: Bundle?) { 
+        // Pass player details here (Optional Parameter)
+        val playerDataDetails = PlayerDataDetails(
+                "player-name",
+                "player-version"
+        )
     
-/* CustomerDataEntity binding with customerPlayerDataEntity, customerVideoDataEntity, customerViewDataEntity */ 
-    val customerDataEntity = CustomerDataEntity( 
-    customerPlayerDataEntity, 
-    customerVideoDataEntity, 
-    customerViewDataEntity) 
+        /* Data about this video Add or change properties here to customize video metadata such as title,language, etc */ 
+        val videoDataDetails =
+                VideoDataDetails(
+                    UUID.randomUUID().toString(),
+                    videoModel?.id
+                ).apply {
+                    videoSeries = "This is video series"
+                    videoProducer = "This is video Producer"
+                    videoContentType = "This is video Content Type"
+                    videoVariant = "This is video Variant"
+                    videoLanguage = "This is video Language"
+        }
+    
+        /* Add values for your Custom Dimensions. Up to 10 strings can be set to track your own data */ 
+        val customDataDetails = CustomDataDetails()
+        customDataDetails.customField1 = "Custom 1"
+        customDataDetails.customField2 = "Custom 2"
+                ||        ||             || 
+                ||        ||             ||    
+        customDataDetails.customField9 = "Custom 9"
 
-// customOptions set customized Domain or else create empty CustomOptions
-    val customOptions = CustomOptions() 
-    customOptions.beaconDomain = "domain.com" //by defalt set up with "metrix.ws"
-} 
+        fastPixDataSDK = FastPixBaseExoPlayer(
+            this,
+            playerView = binding.playerView,
+            exoPlayer = exoPlayer,
+            workSpaceId = "workspace-key",
+            viewerId = UUID.randomUUID().toString(),
+            videoDataDetails = videoDataDetails, // Optional
+            playerDataDetails = playerDataDetails, // Optional
+            customDataDetails = customDataDetails // Optional
+        )
+    } 
 ```
 
 ### Create FastPixBaseExoPlayer
 To set up video analytics, create a FastPixBaseExoPlayer object by providing the following parameters: your application's Context (usually the Activity), the ExoPlayer instance, and the CustomerDataEntity and CustomOptions objects that you have prepared.
 ```Kotlin
-fastPixBaseExoPlayer = FastPixBaseExoPlayer( 
-    this, 
-    exoPlayer, 
-    customerDataEntity, 
-    customOptions 
-) 
+        fastPixDataSDK = FastPixBaseExoPlayer(
+            this,
+            playerView = binding.playerView,
+            exoPlayer = exoPlayer,
+            workSpaceId = "workspace-key",
+            viewerId = UUID.randomUUID().toString(), // viewer-id
+        )
 
 ```
-If your PlayerView hasn’t been configured yet, make sure to set it up now. This step is crucial for capturing various viewer context values and accurately tracking the dimensions of the video player.
-```Kotlin
-fastPixBaseExoPlayer.setPlayerView(playerView) 
-```
+
 ### XML
 
 Include the XML code below to integrate ExoPlayer with FastPix:
 
 ```xml
-<com.google.android.exoplayer2.ui.PlayerView
-        android:id="@+id/player_view"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:background="@android:color/black"
-        app:auto_show="true"
-        app:hide_on_touch="true"
-        app:show_subtitle_button="true"
-        app:surface_type="surface_view" />
+    <com.google.android.exoplayer2.ui.PlayerView
+            android:id="@+id/player_view"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
 ```
 
 Finally, when destroying the player, make sure to call the FastPixBaseExoPlayer.release() function to properly release resources.
 
 ```kotlin
-override fun onDestroy() { 
-  super.onDestroy() 
-  fastPixBaseExoPlayer.release() // Cleanup FastPix tracking 
-  fastPixBaseExoPlayer = null
-} 
-```
-
-# Changing Video Streams
-
-Effective video view tracking is essential for monitoring multiple videos in the same player within your Android application. You should reset tracking in two key scenarios: when loading a new source (such as in video series or episodic content). 
-
-This is done by calling fastPixBaseExoPlayer.videoChange(CustomerVideoData), which will clear all previous video data and reset all metrics for the new video view. Refer to the Metadata section for the list of video details you can provide. While you can include any metadata when changing the video, you should primarily update the values that start with "video". 
-
-It's best to update the video information immediately after instructing the player to load the new source. 
-
-```kotlin
-fastPixBaseExoPlayer.videoChange(CustomerVideoData) 
-```
-
-### Configure error tracking preferences: 
-
-FastPix’s integration with ExoPlayer automatically tracks fatal errors that occur within the player. However, if a fatal error occurs outside of ExoPlayer’s context and you want to log it with FastPix, you can do so by calling the fastPixBaseExoPlayer.error method. 
-
-Note that fastPixBaseExoPlayer.error(FastPixErrorException e) can be used with or without automatic error tracking. If your application includes retry logic to recover from ExoPlayer errors, you may want to disable automatic error tracking by doing the following: 
-```kotlin
-fastPixBaseExoPlayer.setAutomaticErrorTracking(false)// disable 
-
-fastPixBaseExoPlayer.setAutomaticErrorTracking(true)// enable 
+    override fun onDestroy() { 
+      super.onDestroy() 
+      fastPixBaseExoPlayer.release() // Cleanup FastPix tracking 
+    } 
 ```
 
 
