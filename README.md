@@ -1,155 +1,142 @@
-# Introduction
+[![License](https://img.shields.io/badge/License-Proprietary-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-1.1.1-green.svg)](CHANGELOG.md)
+[![Min SDK](https://img.shields.io/badge/minSdk-24-orange.svg)](app/build.gradle.kts)
 
-This SDK simplifies the integration process with ExoPlayer on Android, enabling the seamless collection of player analytics. It automatically tracks video performance metrics, making the data accessible on the FastPix Dashboard for monitoring and analysis.
+# FastPix Exoplayer SDK
 
-This is the FastPix wrapper for ExoPlayer, built on top of FastPix's core Java library, delivering FastPix Data performance analytics for apps that use [Google's ExoPlayer](https://github.com/google/ExoPlayer).
+This SDK enables seamless integration with **Android ExoPlayer**, offering advanced video analytics via the **FastPix Dashboard**. It's a wrapper built on [FastPix’s core Kotlin library](https://github.com/FastPix/android-core-data-sdk) to deliver performance monitoring for video applications using [Google's ExoPlayer](https://github.com/google/exoplayer).
 
-# Key Features:
-- **User engagement metrics:** Capture detailed viewer interaction data. 
-- **Playback quality monitoring:** Real-time performance analysis of your video streams. 
-- **Android performance insights:** Identify and resolve bottlenecks affecting video delivery. 
-- **Customizable tracking:** Flexible configuration to match your specific monitoring needs. 
-- **Error management:** Robust error handling and reporting. 
-- **Custom Domain:** Using with custom Beacon Domain. 
-- **Streaming diagnostics:** Gain deep insights into the performance of your video streaming. 
+## Key Features
+- **User engagement tracking** – Monitor viewer interactions in real-time.
+- **Playback quality analytics** – Evaluate buffering, resolution changes, and network issues.
+- **Custom event tracking** – Track domain-specific user behaviors.
+- **Device & app diagnostics** – Gain insights into playback issues across devices.
+- **Error logging** – Automatically capture fatal and handled playback errors.
+- **Beacon domain support** – Send analytics to a custom tracking domain.
 
-# Prerequisites:
-- Android Studio Arctic Fox or later
-- Minimum Android SDK 21+
-- Sample Player integrated into your project
-- FastPix Data Exo-player SDK added as a dependency
-- Generate a GitHub Personal Access Token (PAT) from Your GitHub account
+## 🔧 Requirements
 
-## Getting started with FastPix:
+- **Android Studio**: Ladybug | 2024.2.1 or later
+- **Minimum SDK**: 24 (Android 7.0)
+- **Target SDK**: 35 (Android 15)
+- **Compile SDK**: 36
+- **Kotlin**: 2.2.10+
+- **Java**: 11
+- **Gradle**: 8.9+
 
-To track and analyze video performance, initialize the FastPix Data SDK with your Workspace key:
+## 🚀 Setup
 
-1. **[Access the FastPix Dashboard](https://dashbord.fastpix.io)**: Log in and navigate to the Workspaces section.
-2. **Locate Your Workspace Key**: Copy the Workspace Key for client-side monitoring. Included in your Android application's code wherever you want to track video performance and analytics.
-
-# Installation:
-
-To get started with integrate the FastPix Data SDK. 
-Gradle configured in your project for managing dependencies
-
-# Installation:
-Add our maven repository to your **settings.gradle**:
+### Step 1: Add the GitHub Maven Repository to `settings.gradle`
 ```groovy
 repositories {
-  maven {
-    url = uri("https://maven.pkg.github.com/FastPix/android-data-exo-player-sdk")
-    credentials {
-        username = "github-user-name" 
-        password = "github-password"
-    }
-  }
-}
-```
-Add the FastPix Data Core SDK dependencie to your **build.gradle**:
-```gradle
-dependencies {
-    implementation 'io.fastpix.data:exoplayer:1.1.0'
-}
-```
-
-## Usage 
-
-Make sure ExoPlayer is installed and integrated with your project as part of the FastPix data setup. You can initialize ExoPlayer with a PlayerView or SurfaceView in your Android application to enable seamless functionality. 
-
-### Kotlin
-
-Integrate the following Kotlin code into your application to configure Exoplayer Player with FastPix.
-
-### Globally declare
-```Kotlin
-import ... 
-
-class VideoPlayerActivity : AppCompatActivity() { 
-    private lateinit var exoPlayer: ExoPlayer // Global ExoPlayer instance 
-    private lateinit var fastPixDataSDK: FastPixBaseExoPlayer // Global FastPix instance 
-} 
-```
-
-# Including Custom Data and metadata
-**workspace_id** is the only mandatory field. Providing additional metadata can greatly enhance analytics and reporting.  
-
-**CustomerData and CustomOptions :** Create the CustomerPlayerData and CustomerVideoData objects as appropriate for your current playback 
-```Kotlin
-    override fun onCreate(savedInstanceState: Bundle?) { 
-        // Pass player details here (Optional Parameter)
-        val playerDataDetails = PlayerDataDetails(
-                "player-name",
-                "player-version"
-        )
-    
-        /* Data about this video Add or change properties here to customize video metadata such as title,language, etc */ 
-        val videoDataDetails =
-                VideoDataDetails(
-                    UUID.randomUUID().toString(),
-                    "Video Title"
-                ).apply {
-                    videoSeries = "This is video series"
-                    videoProducer = "This is video Producer"
-                    videoContentType = "This is video Content Type"
-                    videoVariant = "This is video Variant"
-                    videoLanguage = "This is video Language"
+    maven {
+        url = uri("https://maven.pkg.github.com/FastPix/android-data-exo-player-sdk")
+        credentials {
+            username = "<your-github-username>"
+            password = "<your-personal-access-token>"
         }
-    
-        /* Add values for your Custom Dimensions. Up to 10 strings can be set to track your own data */ 
-        val customDataDetails = CustomDataDetails()
-        customDataDetails.customField1 = "Custom 1"
-        customDataDetails.customField2 = "Custom 2"
-                ||        ||             || 
-                ||        ||             ||    
-        customDataDetails.customField9 = "Custom 9"
-
-        fastPixDataSDK = FastPixBaseExoPlayer(
-            this,
-            playerView = binding.playerView,
-            exoPlayer = exoPlayer,
-            workSpaceId = "workspace-key",
-            viewerId = UUID.randomUUID().toString(),
-            videoDataDetails = videoDataDetails, // Optional
-            playerDataDetails = playerDataDetails, // Optional
-            customDataDetails = customDataDetails // Optional
-        )
-    } 
+    }
+}
 ```
 
-### Create FastPixBaseExoPlayer
-To set up video analytics, create a FastPixBaseExoPlayer object by providing the following parameters: your application's Context (usually the Activity), the ExoPlayer instance, and the CustomerDataEntity and CustomOptions objects that you have prepared.
-```Kotlin
-        fastPixDataSDK = FastPixBaseExoPlayer(
-            this,
-            playerView = binding.playerView,
-            exoPlayer = exoPlayer,
-            workSpaceId = "workspace-key",
-            viewerId = UUID.randomUUID().toString(), // viewer-id
-        )
-
+### Step 2: Add the SDK Dependency to `build.gradle`
+```groovy
+dependencies {
+    implementation 'io.fastpix.data:exoplayer:1.1.1'
+}
 ```
 
-### XML
+## 📖 Usage
 
-Include the XML code below to integrate ExoPlayer with FastPix:
-
-```xml
-    <com.google.android.exoplayer2.ui.PlayerView
-            android:id="@+id/player_view"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent" />
-```
-
-Finally, when destroying the player, make sure to call the FastPixBaseExoPlayer.release() function to properly release resources.
+### Basic Player Setup
 
 ```kotlin
-    override fun onDestroy() { 
-      super.onDestroy()
-      fastPixDataSDK.release() // Cleanup FastPix tracking 
-    } 
+class VideoPlayerActivity : AppCompatActivity() {
+    private lateinit var binding: ActivityVideoPlayerBinding
+    private lateinit var exoPlayer: ExoPlayer
+    private lateinit var fastPixDataSDK: FastPixBaseExoPlayer
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        binding = ActivityVideoPlayerBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+
+        setupPlayer()
+        setupAnalytics()
+    }
+
+    private fun setupPlayer() {
+        exoPlayer = ExoPlayer.Builder(this).build()
+        binding.playerView.player = exoPlayer
+        
+        val mediaItem = MediaItem.fromUri("YOUR_VIDEO_URL")
+        exoPlayer.setMediaItem(mediaItem)
+        exoPlayer.prepare()
+    }
+
+    private fun setupAnalytics() {
+        // Optional
+        val videoDataDetails = VideoDataDetails(
+            videoId = UUID.randomUUID().toString(),
+            videoTitle = "My Video"
+        ).apply {
+            videoSeries = "Demo Series"
+            videoProducer = "Demo Producer"
+            videoContentType = "VOD"
+            // ..etc
+        }
+        // Optional
+        val playerDataDetails = PlayerDataDetails(
+            playerName = "exoplayer",
+            playerVersion = "latest-version"
+        )
+        // Optional
+        val customDataDetails = CustomDataDetails().apply {
+            customField1 = "Custom Value 1"
+            customField2 = "Custom Value 2"
+            // ..etc
+        }
+
+        fastPixDataSDK = FastPixBaseExoPlayer(
+            context = this,
+            playerView = binding.playerView,
+            exoPlayer = exoPlayer,
+            workSpaceId = "workspace-key",
+            playerDataDetails = playerDataDetails,
+            videoDataDetails = videoDataDetails,
+            customDataDetails = customDataDetails
+        )
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        exoPlayer.release()
+        fastPixDataSDK.release()
+    }
+}
 ```
 
+## 📄 License
 
-# Detailed Usage:
+Copyright © 2025 FastPix. All rights reserved.
 
-For more detailed steps and advanced usage, please refer to the official [FastPix Documentation](https://docs.fastpix.io/docs/exo-player-android).
+This project is proprietary software. The FastPix SDK components are proprietary and require appropriate licensing. See individual module README files for specific license information.
+
+## 📧 Support
+
+For questions, issues, or feature requests:
+
+- **Email**: support@fastpix.io
+- **Documentation**: [FastPix Documentation](https://docs.fastpix.io)
+- **SDK Issues**: [GitHub Issues](https://github.com/FastPix/android-core-data-sdk/issues)
+
+## 🔗 Related Documentation
+
+- [Android Data Core SDK README](android-data-core/README.md)
+- [FastPix Documentation](https://docs.fastpix.io)
+- [ExoPlayer Developer Guide](https://developer.android.com/guide/topics/media/exoplayer)
+
+---
+
+**Built with ❤️ using Exoplayer and FastPix Analytics**
+

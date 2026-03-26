@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.1]
+Updates versions, refactors `FastPixBaseExoPlayer` to improve event handling, and enhances documentation.
+
+### General
+- Updates `core` SDK version to `1.2.7` in `libs.versions.toml`.
+- Updates `exoplayer-data-sdk` Maven publication version to `1.1.1`.
+- Configures `settings.gradle.kts` to load GitHub credentials from `local.properties`.
+
+### FastPixBaseExoPlayer
+- Refactors SDK initialization to use `FastPixAnalytics` singleton.
+- Implements a coroutine-based pulse event system for periodic analytics heartbeats.
+- Adds comprehensive state tracking for playback (playing, buffering, seeking, ended).
+- Improves bandwidth and chunk load tracking, including better handling of canceled and failed requests.
+- Ensures proper resource cleanup in `release()` by canceling background jobs and clearing state.
+- Adds `FastPixExoplayerLibraryInfo` to track SDK name and version.
+
+### Documentation
+- Overhauls `README.md` with updated requirements, simplified installation steps, and clearer Kotlin integration examples.
+- Adds version `1.1.1` to `CHANGELOG.md`.
 
 ## [1.1.0]
 

@@ -4,7 +4,7 @@ import kotlin.apply
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
-    id ("maven-publish")
+    id("maven-publish")
 }
 
 android {
@@ -46,9 +46,11 @@ dependencies {
 
     // Exo Player
     api(libs.exoplayer.core)
-    api (libs.exoplayer)
+    api(libs.exoplayer)
     api(libs.exoplayer.hls)
     api(libs.exoplayer.smoothstreaming)
+
+    // FastPix Core
     api(libs.core)
 }
 
@@ -64,7 +66,7 @@ publishing {
         create<MavenPublication>("bar") {
             groupId = "io.fastpix.data"
             artifactId = "exoplayer"
-            version = "1.1.0"
+            version = "1.1.1"
             artifact("${buildDir}/outputs/aar/exoplayer-data-sdk-release.aar")
 
             pom.withXml {

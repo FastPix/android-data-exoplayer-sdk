@@ -7,6 +7,7 @@ import android.view.View
 import com.google.android.exoplayer2.C
 import com.google.android.exoplayer2.ExoPlayer
 import com.google.android.exoplayer2.Format
+import com.google.android.exoplayer2.MediaItem
 import com.google.android.exoplayer2.PlaybackException
 import com.google.android.exoplayer2.Player
 import com.google.android.exoplayer2.Timeline
@@ -17,6 +18,7 @@ import com.google.android.exoplayer2.source.LoadEventInfo
 import com.google.android.exoplayer2.source.MediaLoadData
 import com.google.android.exoplayer2.source.TrackGroupArray
 import com.google.android.exoplayer2.video.VideoSize
+import io.fastpix.data.FastPixAnalytics
 import io.fastpix.data.FastPixDataSDK
 import io.fastpix.data.domain.SDKConfiguration
 import io.fastpix.data.domain.enums.PlayerEventType
@@ -26,7 +28,17 @@ import io.fastpix.data.domain.model.CustomDataDetails
 import io.fastpix.data.domain.model.ErrorModel
 import io.fastpix.data.domain.model.PlayerDataDetails
 import io.fastpix.data.domain.model.VideoDataDetails
+import io.fastpix.data.utils.Logger
+import io.fastpix.exoplayer_data_sdk.sdkInfo.FastPixExoplayerLibraryInfo
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.ceil
 
 /**
@@ -39,18 +51,20 @@ class FastPixBaseExoPlayer(
     private val exoPlayer: ExoPlayer,
     private val workSpaceId: String,
     private val beaconUrl: String? = null,
-    private val viewerId: String,
     private val enableLogging: Boolean = false,
     private val playerDataDetails: PlayerDataDetails? = null,
-    private val videoDataDetails: VideoDataDetails,
-    private val customDataDetails: CustomDataDetails,
+    private val videoDataDetails: VideoDataDetails? = null,
+    private val customDataDetails: CustomDataDetails? = null,
 ) : PlayerListener {
 
-    private val TAG = "FastPixBaseExoPlayer"
-    private lateinit var fastPixDataSDK: FastPixDataSDK
+    private val TAG = "FastPixBaseMedia3Player"
+    private var fastPixDataSDK: FastPixDataSDK? = null
 
     // State machine for valid event transitions
     private var currentEventState: PlayerEvent? = null
+    private val isPulseScheduled = AtomicBoolean(false)
+    private val dispatcherScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var pulseJob: Job? = null
 
     // Queue for variant change events that need to be deferred until play event
     private val pendingVariantChangeEvents = mutableListOf<Boolean>()
@@ -61,56 +75,66 @@ class FastPixBaseExoPlayer(
     private var detectMimeType: Boolean = true
     private var currentTimelineWindow: Timeline.Window = Timeline.Window()
 
-    private var frameRate: String? = null
+    private var frameRate: Int? = null
     private var codec: String? = null
     private var bitRate: String? = null
     private var mimeType: String? = null
     private var videoSourceWidth: Int? = null
+    private val PULSE_INTERVAL = 10_000L // 1 second
     private var videoSourceHeight: Int? = null
     private var errorCode: String? = null
     private var errorMessage: String? = null
     private var playerCodec: String? = null
     private var isBuffering = false
+    private var videoSourceUrl: String? = null
+    private var isReleased = false
     private var isSeeking = false
     private var isEnded = false
-    private var videoSourceUrl: String? = null
-    private var isSDKInitialized = false
+    private var isVideoPlaying = false
 
     init {
         initializeFastPixSDK()
     }
 
     private fun initializeFastPixSDK() {
-        fastPixDataSDK = FastPixDataSDK()
+        setUpListener()
         val sdkConfiguration = SDKConfiguration(
             workspaceId = workSpaceId,
             beaconUrl = beaconUrl,
-            viewerId = viewerId,
-            playerData = playerDataDetails ?: PlayerDataDetails("Exo player", "2.19.1"),
+            playerData = playerDataDetails ?: PlayerDataDetails(
+                "Exoplayer",
+                "2.19.1"
+            ),
             videoData = videoDataDetails,
             playerListener = this,
             enableLogging = enableLogging,
-            customData = customDataDetails
+            customData = customDataDetails,
         )
-        fastPixDataSDK.initialize(sdkConfiguration, context)
+        FastPixAnalytics.initialize(sdkConfiguration, context)
+        fastPixDataSDK = FastPixAnalytics.getSDK()
         dispatchViewBegin()
         dispatchPlayerReadyEvent()
         dispatchPlayEvent()
-        setUpListener()
     }
 
     private fun dispatchViewBegin() {
+        if (isReleased || fastPixDataSDK == null) return
+        Logger.log(TAG, "PLAYER_EVENT: viewBegin")
         if (enableLogging) {
             Log.d(TAG, "Dispatching ViewBegin event")
         }
-        fastPixDataSDK.dispatchEvent(PlayerEventType.viewBegin)
+        cancelPulseEvent()
+        fastPixDataSDK?.dispatchEvent(PlayerEventType.viewBegin)
     }
 
     private fun dispatchPlayerReadyEvent() {
+        if (isReleased || fastPixDataSDK == null) return
+        Logger.log(TAG, "PLAYER_EVENT: playerReady")
         if (enableLogging) {
             Log.d(TAG, "Dispatching Play Ready event")
         }
-        fastPixDataSDK.dispatchEvent(PlayerEventType.playerReady)
+        cancelPulseEvent()
+        fastPixDataSDK?.dispatchEvent(PlayerEventType.playerReady)
     }
 
     /**
@@ -152,7 +176,7 @@ class FastPixBaseExoPlayer(
                 decoderReuseEvaluation: DecoderReuseEvaluation?
             ) {
                 bitRate = format.bitrate.takeIf { it > 0 }.toString()
-                frameRate = format.frameRate.takeIf { it > 0 }?.toInt().toString()
+                frameRate = format.frameRate.takeIf { it > 0 }?.toInt()
                 videoSourceWidth = format.width
                 videoSourceHeight = format.height
             }
@@ -176,7 +200,9 @@ class FastPixBaseExoPlayer(
                         segmentHeight = format.height
                     }
                     try {
-                        videoSourceUrl = loadEventInfo.uri.toString()
+                        if (videoSourceUrl != null) {
+                            videoSourceUrl = loadEventInfo.uri.toString()
+                        }
                         val fullUri = loadEventInfo.uri.toString()
                         val hostWithScheme = "https://${loadEventInfo.uri.host}"
                         val encodedPath = fullUri.removePrefix(hostWithScheme)
@@ -236,11 +262,13 @@ class FastPixBaseExoPlayer(
                 if (loadEventInfo.uri != null) {
                     try {
                         val fullUri = loadEventInfo.uri.toString()
-                        val hostWithScheme = "https://${loadEventInfo.uri.host}"
+                        val host = loadEventInfo.uri.host
+                        val hostWithScheme = "https://${host}"
                         val encodedPath = fullUri.removePrefix(hostWithScheme)
                         bandwidthDispatcher.onLoadCanceled(
                             loadEventInfo.loadTaskId,
                             encodedPath,
+                            host,
                             loadEventInfo.responseHeaders
                         )
                     } catch (e: Exception) {
@@ -261,7 +289,9 @@ class FastPixBaseExoPlayer(
                     val hostWithScheme = "https://${loadEventInfo.uri.host}"
                     val encodedPath = fullUri.removePrefix(hostWithScheme)
                     bandwidthDispatcher.onLoadError(
-                        loadEventInfo.loadTaskId, encodedPath, error
+                        loadEventInfo.loadTaskId,
+                        encodedPath,
+                        error
                     )
                 } catch (e: Exception) {
                     Log.e(TAG, "Error handling load error: ${e.message}")
@@ -270,7 +300,24 @@ class FastPixBaseExoPlayer(
         })
 
 
+
         exoPlayer.addListener(object : Player.Listener {
+
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                if (videoSourceUrl != null) {
+                    mediaItem?.localConfiguration?.uri?.let {
+                        videoSourceUrl = it.toString()
+                    }
+                }
+            }
+
+            override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+                if (videoSourceUrl != null) {
+                    exoPlayer.currentMediaItem?.localConfiguration?.uri?.let {
+                        videoSourceUrl = it.toString()
+                    }
+                }
+            }
 
             override fun onVideoSizeChanged(videoSize: VideoSize) {
                 super.onVideoSizeChanged(videoSize)
@@ -286,6 +333,7 @@ class FastPixBaseExoPlayer(
 
                 when (playbackState) {
                     Player.STATE_READY -> {
+                        isVideoPlaying = true
                         videoSourceHeight = exoPlayer.videoSize.height
                         videoSourceWidth = exoPlayer.videoSize.width
                         if (isBuffering) {
@@ -306,6 +354,10 @@ class FastPixBaseExoPlayer(
                         }
                     }
 
+                    Player.STATE_IDLE -> {
+                        dispatchPauseEvent()
+                    }
+
                     Player.STATE_ENDED -> {
                         isEnded = true
                         dispatchPauseEvent(exoPlayer.duration.toInt())
@@ -315,15 +367,24 @@ class FastPixBaseExoPlayer(
 
             }
 
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                super.onPlayWhenReadyChanged(playWhenReady, reason)
+                if (!playWhenReady) {
+                    dispatchPauseEvent()
+                }
+            }
+
 
             override fun onPositionDiscontinuity(
-                oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int
             ) {
                 super.onPositionDiscontinuity(oldPosition, newPosition, reason)
                 if (!isSeeking && reason == Player.DISCONTINUITY_REASON_SEEK) {
                     isSeeking = true
                     val currentSeekPosition = oldPosition.positionMs.toInt()
-                    if (!isEnded) {
+                    if (isVideoPlaying) {
                         dispatchPauseEvent(currentSeekPosition)
                     }
                     dispatchSeekingEvent(currentSeekPosition)
@@ -332,7 +393,8 @@ class FastPixBaseExoPlayer(
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (isPlaying) {
-                    if (currentEventState != PlayerEvent.SEEKED && isSDKInitialized) {
+                    isVideoPlaying = true
+                    if (currentEventState != PlayerEvent.SEEKED) {
                         dispatchPlayEvent()
                     }
                     if (isSeeking) {
@@ -343,11 +405,9 @@ class FastPixBaseExoPlayer(
                         isBuffering = false
                         dispatchBufferedEvent()
                     }
-                    isSDKInitialized = true
                     dispatchPlayingEvent()
-                }
-
-                if (!isPlaying && !isBuffering && !isSeeking && !isEnded) {
+                } else {
+                    isVideoPlaying = false
                     dispatchPauseEvent()
                 }
             }
@@ -379,112 +439,135 @@ class FastPixBaseExoPlayer(
     }
 
     private fun dispatchPlayEvent() {
+        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
         if (transitionToEvent(PlayerEvent.PLAY)) {
+            Logger.log(TAG, "PLAYER_EVENT: play")
             if (enableLogging) {
                 Log.d(TAG, "Dispatching Play event")
             }
-            fastPixDataSDK.dispatchEvent(PlayerEventType.play)
-
+            cancelPulseEvent()
+            fastPixDataSDK?.dispatchEvent(PlayerEventType.play)
             // Process any queued variant change events after play event
             processQueuedVariantChangeEvents()
         }
     }
 
     private fun dispatchPlayingEvent() {
+        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
         if (transitionToEvent(PlayerEvent.PLAYING)) {
+            Logger.log(TAG, "PLAYER_EVENT: playing")
             if (enableLogging) {
                 Log.d(TAG, "Dispatching Playing event")
             }
-            fastPixDataSDK.dispatchEvent(PlayerEventType.playing)
+            schedulePulseEvents()
+            fastPixDataSDK?.dispatchEvent(PlayerEventType.playing)
         }
     }
 
     private fun dispatchPauseEvent(currentPosition: Int? = null) {
+        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
         if (transitionToEvent(PlayerEvent.PAUSE)) {
+            Logger.log(TAG, "PLAYER_EVENT: pause position=${currentPosition ?: "none"}")
             if (enableLogging) {
                 Log.d(TAG, "Dispatching Pause event")
             }
             // Note: There's no Pause event type in PlayerEventType enum
             // For now, we'll just track the state transition without dispatching
             // You may need to add a Pause event type to PlayerEventType enum
+            cancelPulseEvent()
             if (currentPosition != null) {
-                fastPixDataSDK.dispatchEvent(PlayerEventType.pause, currentPosition)
+                fastPixDataSDK?.dispatchEvent(PlayerEventType.pause, currentPosition)
             } else {
-                fastPixDataSDK.dispatchEvent(PlayerEventType.pause)
+                fastPixDataSDK?.dispatchEvent(PlayerEventType.pause)
             }
         }
     }
 
     private fun dispatchSeekingEvent(currentPosition: Int? = null) {
+        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
         if (transitionToEvent(PlayerEvent.SEEKING)) {
             if (enableLogging) {
                 Log.d(TAG, "Dispatching Seeking event")
             }
+            cancelPulseEvent()
             // Temporarily set currentPosition to seeking start position for the seeking event
-            fastPixDataSDK.dispatchEvent(PlayerEventType.seeking, currentPosition)
+            fastPixDataSDK?.dispatchEvent(PlayerEventType.seeking, currentPosition)
         }
     }
 
     private fun dispatchSeekedEvent() {
+        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
         if (transitionToEvent(PlayerEvent.SEEKED)) {
             if (enableLogging) {
                 Log.d(TAG, "Dispatching Seeked event")
             }
-            fastPixDataSDK.dispatchEvent(PlayerEventType.seeked)
+            cancelPulseEvent()
+            fastPixDataSDK?.dispatchEvent(PlayerEventType.seeked)
         }
     }
 
     private fun dispatchBufferingEvent() {
+        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
         if (transitionToEvent(PlayerEvent.BUFFERING)) {
+            Logger.log(TAG, "PLAYER_EVENT: buffering_start")
             if (enableLogging) {
                 Log.d(TAG, "Dispatching Buffering event")
             }
-            fastPixDataSDK.dispatchEvent(PlayerEventType.buffering)
+            fastPixDataSDK?.dispatchEvent(PlayerEventType.buffering)
         }
     }
 
     private fun dispatchBufferedEvent() {
+        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
         if (transitionToEvent(PlayerEvent.BUFFERED)) {
+            Logger.log(TAG, "PLAYER_EVENT: buffering_end")
             if (enableLogging) {
                 Log.d(TAG, "Dispatching Buffered event")
             }
-            fastPixDataSDK.dispatchEvent(PlayerEventType.buffered)
+            cancelPulseEvent()
+            fastPixDataSDK?.dispatchEvent(PlayerEventType.buffered)
         }
     }
 
     private fun dispatchEndedEvent(currentPosition: Int? = null) {
+        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
         if (transitionToEvent(PlayerEvent.ENDED)) {
+            Logger.log(TAG, "PLAYER_EVENT: ended position=${currentPosition ?: "none"}")
             if (enableLogging) {
                 Log.d(TAG, "Dispatching Ended event")
             }
+            cancelPulseEvent()
             if (currentPosition != null) {
-                fastPixDataSDK.dispatchEvent(PlayerEventType.ended, currentPosition)
+                fastPixDataSDK?.dispatchEvent(PlayerEventType.ended, currentPosition)
             } else {
-                fastPixDataSDK.dispatchEvent(PlayerEventType.ended)
+                fastPixDataSDK?.dispatchEvent(PlayerEventType.ended)
             }
-
         }
     }
 
     private fun dispatchVariantChangeEvent() {
+        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
         if (transitionToEvent(PlayerEvent.VARIANT_CHANGED)) {
             if (enableLogging) {
                 Log.d(TAG, "Dispatching VariantChange event")
             }
-            fastPixDataSDK.dispatchEvent(PlayerEventType.variantChanged)
+            schedulePulseEvents()
+            fastPixDataSDK?.dispatchEvent(PlayerEventType.variantChanged)
         } else {
             pendingVariantChangeEvents.add(true)
         }
     }
 
     private fun dispatchErrorEvent(error: PlaybackException) {
+        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
         if (transitionToEvent(PlayerEvent.ERROR)) {
             if (enableLogging) {
                 Log.d(TAG, "Dispatching Error event: ${error.message}")
             }
+            cancelPulseEvent()
             errorCode = error.errorCode.toString()
             errorMessage = "${error.cause}"
-            fastPixDataSDK.dispatchEvent(PlayerEventType.error)
+            fastPixDataSDK?.dispatchEvent(PlayerEventType.error)
         }
     }
 
@@ -522,17 +605,20 @@ class FastPixBaseExoPlayer(
     override fun mimeType(): String? =
         mimeType ?: exoPlayer.currentMediaItem?.localConfiguration?.mimeType
 
-    override fun sourceFps(): String? = frameRate
+    override fun sourceFps(): Int? = frameRate
 
     override fun sourceAdvertisedBitrate(): String? = bitRate
 
-    override fun sourceAdvertiseFrameRate(): String? = frameRate
+    override fun sourceAdvertiseFrameRate(): Int? = frameRate
 
     override fun sourceDuration(): Int? = exoPlayer.duration.toInt()
 
     override fun isPause(): Boolean? = !exoPlayer.isPlaying
 
     override fun isAutoPlay(): Boolean? = false
+    override fun preLoad(): Boolean? {
+        return false
+    }
 
     override fun isBuffering(): Boolean? = exoPlayer.playbackState == Player.STATE_BUFFERING
 
@@ -545,18 +631,18 @@ class FastPixBaseExoPlayer(
 
     override fun getVideoCodec(): String? = codec
     override fun getSoftwareName(): String? {
-        return null
+        return FastPixExoplayerLibraryInfo.SDK_NAME
     }
 
     override fun getSoftwareVersion(): String? {
-        return null
+        return FastPixExoplayerLibraryInfo.SDK_VERSION
     }
 
     override fun isLive(): Boolean? =
         exoPlayer.isCurrentMediaItemLive // This is a sample video, not live
 
     override fun sourceUrl(): String? =
-        exoPlayer.currentMediaItem?.localConfiguration?.uri.toString()
+        videoSourceUrl ?: exoPlayer.currentMediaItem?.localConfiguration?.uri.toString()
 
     override fun isFullScreen(): Boolean? {
         val orientation = context.resources.configuration.orientation
@@ -566,8 +652,14 @@ class FastPixBaseExoPlayer(
     override fun getBandWidthData(): BandwidthModel {
         val bandWidthModel = BandwidthModel()
         bandWidthModel.requestId = chunkDownloadData?.requestId
-        bandWidthModel.requestUrl =
-            "https://${chunkDownloadData?.requestHostName}${chunkDownloadData?.requestUrl}"
+        // Only construct URL if both host and path are available
+        val hostName = chunkDownloadData?.requestHostName
+        val requestUrl = chunkDownloadData?.requestUrl
+        bandWidthModel.requestUrl = if (hostName != null && requestUrl != null) {
+            "https://${hostName}${requestUrl}"
+        } else {
+            null
+        }
         bandWidthModel.requestMethod = chunkDownloadData?.requestType
         bandWidthModel.requestResponseHeaders = chunkDownloadData?.requestResponseHeaders
         bandWidthModel.requestResponseCode = chunkDownloadData?.requestErrorCode.toString()
@@ -580,14 +672,18 @@ class FastPixBaseExoPlayer(
     }
 
     fun release() {
-        fastPixDataSDK.release()
+        isReleased = true
+        cancelPulseEvent()
+        if (fastPixDataSDK != null) {
+            FastPixAnalytics.release()
+        }
         mimeType = null
         frameRate = null
         playerCodec = null
         currentEventState = null
+        isEnded = false
         videoSourceHeight = null
         videoSourceWidth = null
-        isEnded = false
         detectMimeType = false
         renditionList = null
         codec = null
@@ -595,6 +691,7 @@ class FastPixBaseExoPlayer(
         errorCode = null
         errorMessage = null
         pendingVariantChangeEvents.clear()
+        Logger.log(TAG, "onPlayerRelease(): complete")
     }
 
     /**
@@ -642,7 +739,9 @@ class FastPixBaseExoPlayer(
         var loadedSegments: HashMap<Long, ChunkDownloadData> = HashMap()
 
         open fun onLoadError(
-            loadTaskId: Long, e: IOException, segmentUrl: String?
+            loadTaskId: Long,
+            e: IOException,
+            segmentUrl: String?
         ): ChunkDownloadData {
             var segmentData: ChunkDownloadData? = loadedSegments[loadTaskId]
             if (segmentData == null) {
@@ -656,11 +755,20 @@ class FastPixBaseExoPlayer(
         }
 
         open fun onLoadCanceled(
-            loadTaskId: Long, segmentUrl: String?
+            loadTaskId: Long,
+            segmentUrl: String?,
+            host: String?
         ): ChunkDownloadData {
             var segmentData: ChunkDownloadData? = loadedSegments[loadTaskId]
             if (segmentData == null) {
                 segmentData = ChunkDownloadData(loadTaskId = loadTaskId)
+            }
+            // Set requestUrl and requestHostName if they're not already set
+            if (segmentData.requestUrl == null && segmentUrl != null) {
+                segmentData.requestUrl = segmentUrl
+            }
+            if (segmentData.requestHostName == null && host != null) {
+                segmentData.requestHostName = host
             }
             segmentData.requestCancel = "genericLoadCanceled"
             segmentData.requestResponseEnd = System.currentTimeMillis()
@@ -683,7 +791,9 @@ class FastPixBaseExoPlayer(
                     )
                 } catch (e: IllegalStateException) {
                     Log.e(
-                        "ChunkDownloadData", "Player is in an invalid state: ${e.message}", e
+                        "ChunkDownloadData",
+                        "Player is in an invalid state: ${e.message}",
+                        e
                     )
                 }
             }
@@ -741,7 +851,10 @@ class FastPixBaseExoPlayer(
         }
 
         open fun onLoadCompleted(
-            loadTaskId: Long, segmentUrl: String?, bytesLoaded: Long, trackFormat: Format?
+            loadTaskId: Long,
+            segmentUrl: String?,
+            bytesLoaded: Long,
+            trackFormat: Format?
         ): ChunkDownloadData? {
             val segmentData: ChunkDownloadData = loadedSegments[loadTaskId] ?: return null
             segmentData.requestBytesLoaded = bytesLoaded
@@ -753,7 +866,10 @@ class FastPixBaseExoPlayer(
                         val tracks = tracksList[i]
                         for (trackGroupIndex in 0 until tracks.length) {
                             val currentFormat = tracks.getFormat(trackGroupIndex)
-                            if (trackFormat.width == currentFormat.width && trackFormat.height == currentFormat.height && trackFormat.bitrate == currentFormat.bitrate) {
+                            if (trackFormat.width == currentFormat.width &&
+                                trackFormat.height == currentFormat.height &&
+                                trackFormat.bitrate == currentFormat.bitrate
+                            ) {
                                 segmentData.requestCurrentLevel = trackGroupIndex
                             }
                         }
@@ -770,22 +886,31 @@ class FastPixBaseExoPlayer(
      */
     internal inner class BandwidthMetricHls : BandwidthMetric() {
         override fun onLoadError(
-            loadTaskId: Long, e: IOException, segmentUrl: String?
+            loadTaskId: Long,
+            e: IOException,
+            segmentUrl: String?
         ): ChunkDownloadData {
-            val loadData: ChunkDownloadData = super.onLoadError(loadTaskId, e, segmentUrl)
+            val loadData: ChunkDownloadData =
+                super.onLoadError(loadTaskId, e, segmentUrl)
             return loadData
         }
 
         override fun onLoadCanceled(
-            loadTaskId: Long, segmentUrl: String?
+            loadTaskId: Long,
+            segmentUrl: String?,
+            host: String?
         ): ChunkDownloadData {
-            val loadData: ChunkDownloadData = super.onLoadCanceled(loadTaskId, segmentUrl)
+            val loadData: ChunkDownloadData =
+                super.onLoadCanceled(loadTaskId, segmentUrl, host)
             loadData.requestCancel = "FragLoadEmergencyAborted"
             return loadData
         }
 
         override fun onLoadCompleted(
-            loadTaskId: Long, segmentUrl: String?, bytesLoaded: Long, trackFormat: Format?
+            loadTaskId: Long,
+            segmentUrl: String?,
+            bytesLoaded: Long,
+            trackFormat: Format?
         ): ChunkDownloadData? {
             val loadData: ChunkDownloadData? =
                 super.onLoadCompleted(loadTaskId, segmentUrl, bytesLoaded, trackFormat)
@@ -821,19 +946,28 @@ class FastPixBaseExoPlayer(
         fun currentBandwidthMetric(): BandwidthMetric = bandwidthMetricHls
 
         fun onLoadError(
-            loadTaskId: Long, segmentUrl: String?, e: IOException
+            loadTaskId: Long,
+            segmentUrl: String?,
+            e: IOException
         ) {
             val loadData: ChunkDownloadData = currentBandwidthMetric().onLoadError(
-                loadTaskId, e, segmentUrl
+                loadTaskId,
+                e,
+                segmentUrl
             )
             dispatchChunkEvent(REQUEST_FAILED, loadData)
         }
 
         fun onLoadCanceled(
-            loadTaskId: Long, segmentUrl: String?, headers: Map<String, List<String>>
+            loadTaskId: Long,
+            segmentUrl: String?,
+            host: String?,
+            headers: Map<String, List<String>>
         ) {
             val loadData: ChunkDownloadData = currentBandwidthMetric().onLoadCanceled(
-                loadTaskId, segmentUrl
+                loadTaskId,
+                segmentUrl,
+                host
             )
             parseHeaders(loadData, headers)
             dispatchChunkEvent(REQUEST_CANCELLED, loadData)
@@ -872,7 +1006,10 @@ class FastPixBaseExoPlayer(
             segmentMimeType: String
         ) {
             val loadData: ChunkDownloadData? = currentBandwidthMetric().onLoadCompleted(
-                loadTaskId, segmentUrl, bytesLoaded, trackFormat
+                loadTaskId,
+                segmentUrl,
+                bytesLoaded,
+                trackFormat
             )
             if (loadData != null) {
                 parseHeaders(loadData, responseHeaders)
@@ -881,7 +1018,8 @@ class FastPixBaseExoPlayer(
         }
 
         private fun parseHeaders(
-            loadData: ChunkDownloadData, responseHeaders: Map<String, List<String>>
+            loadData: ChunkDownloadData,
+            responseHeaders: Map<String, List<String>>
         ) {
             val headers: Map<String, String>? = parseHeaders(responseHeaders)
             if (headers != null) {
@@ -939,18 +1077,33 @@ class FastPixBaseExoPlayer(
         }
 
         private fun dispatchRequestCompleted(data: ChunkDownloadData) {
+            if (isReleased || fastPixDataSDK?.isInitialized() == false) return
             chunkDownloadData = data
-            fastPixDataSDK.dispatchEvent(PlayerEventType.requestCompleted)
+            fastPixDataSDK?.dispatchEvent(PlayerEventType.requestCompleted)
         }
 
         private fun dispatchRequestCancelled(data: ChunkDownloadData) {
+            if (isReleased || fastPixDataSDK?.isInitialized() == false) return
+            // Set chunkDownloadData before dispatching to ensure data is available
+            // even if SDK state is cleared during release
             chunkDownloadData = data
-            fastPixDataSDK.dispatchEvent(PlayerEventType.requestCanceled)
+            // Capture bandwidth data synchronously before dispatch to avoid race condition
+            // during SDK release. Store it in SDKStateService so event builder can access it
+            // even if playerListener is cleared during release
+            val bandwidthData = getBandWidthData()
+            try {
+                val sdkStateService = io.fastpix.data.di.DependencyContainer.getSDKStateService()
+                sdkStateService.setLastRequestCancelledBandwidthData(bandwidthData)
+            } catch (e: Exception) {
+                // SDK might be in release process, ignore
+            }
+            fastPixDataSDK?.dispatchEvent(PlayerEventType.requestCanceled)
         }
 
         private fun dispatchRequestFailed(data: ChunkDownloadData) {
+            if (isReleased || fastPixDataSDK?.isInitialized() == false) return
             chunkDownloadData = data
-            fastPixDataSDK.dispatchEvent(PlayerEventType.requestFailed)
+            fastPixDataSDK?.dispatchEvent(PlayerEventType.requestFailed)
         }
 
         private fun parseHeaders(responseHeaders: Map<String, List<String>>): Map<String, String> {
@@ -981,7 +1134,8 @@ class FastPixBaseExoPlayer(
         }
 
         private fun shouldDispatchEvent(
-            data: ChunkDownloadData?, eventType: String
+            data: ChunkDownloadData?,
+            eventType: String
         ): Boolean {
             if (data != null) {
                 requestSegmentDuration =
@@ -1006,10 +1160,39 @@ class FastPixBaseExoPlayer(
                 REQUEST_FAILED -> numberOfRequestFailedBeaconsSentPerSegment++
             }
 
-            if (numberOfRequestCompletedBeaconsSentPerSegment > maxNumberOfEventsPerSegmentDuration || numberOfRequestCancelBeaconsSentPerSegment > maxNumberOfEventsPerSegmentDuration || numberOfRequestFailedBeaconsSentPerSegment > maxNumberOfEventsPerSegmentDuration) {
+            if (numberOfRequestCompletedBeaconsSentPerSegment > maxNumberOfEventsPerSegmentDuration
+                || numberOfRequestCancelBeaconsSentPerSegment > maxNumberOfEventsPerSegmentDuration
+                || numberOfRequestFailedBeaconsSentPerSegment > maxNumberOfEventsPerSegmentDuration
+            ) {
                 return false
             }
             return true
+        }
+    }
+
+
+    private fun schedulePulseEvents() {
+        if (isPulseScheduled.get()) return
+
+        isPulseScheduled.set(true)
+        Logger.log(TAG, "COROUTINE_START: scope=playerScope task=pulseLoop")
+        pulseJob = dispatcherScope.launch {
+            while (isPulseScheduled.get()) {
+                delay(PULSE_INTERVAL)
+                if (isPulseScheduled.get()) {
+                    withContext(Dispatchers.Main) {
+                        fastPixDataSDK?.dispatchEvent(PlayerEventType.pulse)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun cancelPulseEvent() {
+        if (isPulseScheduled.get()) {
+            Logger.log(TAG, "COROUTINE_CANCELLED: scope=playerScope task=pulseLoop")
+            isPulseScheduled.set(false)
+            pulseJob?.cancel()
         }
     }
 

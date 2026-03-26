@@ -19,8 +19,14 @@ dependencyResolutionManagement {
         maven {
             url = uri("https://maven.pkg.github.com/FastPix/android-core-data-sdk")
             credentials {
-                username = "github-username"
-                password = "github-token"
+                val props = java.util.Properties()
+                val localPropsFile = file("${rootDir}/local.properties")
+
+                if (localPropsFile.exists()) {
+                    props.load(localPropsFile.inputStream())
+                }
+                username = props.getProperty("gpr.user")
+                password = props.getProperty("gpr.key")
             }
         }
     }
