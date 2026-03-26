@@ -120,7 +120,6 @@ class MainActivity : AppCompatActivity() {
             playerView = binding.playerView,
             exoPlayer = exoPlayer,
             workSpaceId = "workspace-key",
-            viewerId = UUID.randomUUID().toString(),
             videoDataDetails = videoDataDetails,
             playerDataDetails = playerDataDetails,
             customDataDetails = customDataDetails
