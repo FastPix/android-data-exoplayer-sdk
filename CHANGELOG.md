@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.2]
+Improves pulse analytics dispatch behavior during playback state transitions and updates SDK versions/documentation.
+
+### General
+- Updates `core` SDK version to `1.2.9` in `libs.versions.toml`.
+- Updates `FastPixExoplayerLibraryInfo` SDK version constant to `1.1.2`.
+
+### FastPixBaseExoPlayer
+- Ensures pulse events are scheduled on `viewBegin`, `play`, and `buffering` instead of being canceled.
+- Prevents unnecessary pulse cancellation on `playerReady`, `seeking`, and `buffered`.
+- Updates `seeked` handling to cancel pulse events only when playback is not active, and keep pulse scheduling when playback continues.
+- Stops scheduling pulse events on `variantChanged` to avoid unintended heartbeat behavior during rendition switches.
+
 ## [1.1.1]
 Updates versions, refactors `FastPixBaseExoPlayer` to improve event handling, and enhances documentation.
 
