@@ -2,6 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.3]
+- Upgrades Core SDK to 1.3.0
+
 ## [1.1.2]
 Improves pulse analytics dispatch behavior during playback state transitions and updates SDK versions/documentation.
 

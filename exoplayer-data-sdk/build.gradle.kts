@@ -66,7 +66,7 @@ publishing {
         create<MavenPublication>("bar") {
             groupId = "io.fastpix.data"
             artifactId = "exoplayer"
-            version = "1.1.2"
+            version = "1.1.3"
             artifact("${buildDir}/outputs/aar/exoplayer-data-sdk-release.aar")
 
             pom.withXml {
