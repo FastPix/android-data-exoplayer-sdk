@@ -1091,13 +1091,6 @@ class FastPixBaseExoPlayer(
             // Capture bandwidth data synchronously before dispatch to avoid race condition
             // during SDK release. Store it in SDKStateService so event builder can access it
             // even if playerListener is cleared during release
-            val bandwidthData = getBandWidthData()
-            try {
-                val sdkStateService = io.fastpix.data.di.DependencyContainer.getSDKStateService()
-                sdkStateService.setLastRequestCancelledBandwidthData(bandwidthData)
-            } catch (e: Exception) {
-                // SDK might be in release process, ignore
-            }
             fastPixDataSDK?.dispatchEvent(PlayerEventType.requestCanceled)
         }
 
