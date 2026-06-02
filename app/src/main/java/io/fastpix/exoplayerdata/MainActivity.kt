@@ -134,7 +134,7 @@ class MainActivity : AppCompatActivity() {
         binding.playerView.player = exoPlayer
         // Create MediaItem from URL
         val mediaItem =
-            MediaItem.fromUri(videoModel?.url!!)
+            MediaItem.fromUri(videoModel?.url.orEmpty())
         // Set media item and prepare
         exoPlayer.setMediaItem(mediaItem)
         exoPlayer.prepare()
@@ -455,7 +455,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         try {
-            connectivityManager.registerNetworkCallback(networkRequest, networkCallback!!)
+            networkCallback?.let { connectivityManager.registerNetworkCallback(networkRequest, it) }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to register network callback", e)
         }
