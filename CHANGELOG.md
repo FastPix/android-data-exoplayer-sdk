@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.4]
+- Upgrades Core SDK to 1.3.1
+- Removes synchronous bandwidth data capture and storage in `onLoadCanceled` to streamline event dispatching.
+
 ## [1.1.3]
 - Upgrades Core SDK to 1.3.0
 
