@@ -16,8 +16,6 @@ It is **not a video player**. It does not render video or replace ExoPlayer; it 
 
 ## Start here
 
-Follow these in order:
-
 1. [Why FastPix for ExoPlayer monitoring](#why-fastpix)
 2. [What you can track](#what-you-can-track)
 3. [Who it's for](#who-its-for)
