@@ -22,7 +22,7 @@ class VideoListScreen : AppCompatActivity() {
         binding.recyclerView.adapter = videoAdapter
 
         videoAdapter.onVideoClick = { video ->
-            val intent = Intent(this, MainActivity::class.java)
+            val intent = Intent(this, VideoPlayerActivity::class.java)
             intent.putExtra("video_model", video)
             startActivity(intent)
         }

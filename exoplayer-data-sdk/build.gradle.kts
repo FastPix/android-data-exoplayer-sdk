@@ -3,7 +3,6 @@ import kotlin.apply
 
 plugins {
     alias(libs.plugins.android.library)
-    alias(libs.plugins.kotlin.android)
     id("maven-publish")
 }
 
@@ -31,8 +30,21 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
-    kotlinOptions {
-        jvmTarget = "11"
+    testOptions {
+        unitTests {
+            // android.util.Log and friends return defaults instead of throwing in plain JVM tests
+            isReturnDefaultValues = true
+        }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        // Apps compiling against this library read its Kotlin metadata, readable one Kotlin version
+        // back. 2.2 keeps it readable by Kotlin 2.1+, the floor FastPix Core 1.3.2 already sets,
+        // instead of the 2.2+ the toolchain's Kotlin 2.3 would require
+        languageVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_2)
+        apiVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_2_2)
     }
 }
 
@@ -41,6 +53,9 @@ dependencies {
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
     testImplementation(libs.junit)
+    testImplementation(libs.mockk)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.robolectric)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 
@@ -49,6 +64,7 @@ dependencies {
     api(libs.exoplayer)
     api(libs.exoplayer.hls)
     api(libs.exoplayer.smoothstreaming)
+    api(libs.exoplayer.ima)
 
     // FastPix Core
     api(libs.core)
@@ -66,8 +82,8 @@ publishing {
         create<MavenPublication>("bar") {
             groupId = "io.fastpix.data"
             artifactId = "exoplayer"
-            version = "1.1.4"
-            artifact("${buildDir}/outputs/aar/exoplayer-data-sdk-release.aar")
+            version = "1.1.5"
+            artifact(layout.buildDirectory.file("outputs/aar/exoplayer-data-sdk-release.aar"))
 
             pom.withXml {
                 val dependenciesNode = asNode().appendNode("dependencies")
