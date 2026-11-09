@@ -1,45 +1,44 @@
 package io.fastpix.exoplayer_data_sdk
 
+import android.app.Activity
 import android.content.Context
-import android.content.res.Configuration
-import android.util.Log
+import android.content.ContextWrapper
 import android.view.View
+import com.google.ads.interactivemedia.v3.api.AdErrorEvent
 import com.google.android.exoplayer2.C
 import com.google.android.exoplayer2.ExoPlayer
-import com.google.android.exoplayer2.Format
-import com.google.android.exoplayer2.MediaItem
 import com.google.android.exoplayer2.PlaybackException
 import com.google.android.exoplayer2.Player
-import com.google.android.exoplayer2.Timeline
-import com.google.android.exoplayer2.Tracks
-import com.google.android.exoplayer2.analytics.AnalyticsListener
-import com.google.android.exoplayer2.decoder.DecoderReuseEvaluation
-import com.google.android.exoplayer2.source.LoadEventInfo
-import com.google.android.exoplayer2.source.MediaLoadData
-import com.google.android.exoplayer2.source.TrackGroup
-import com.google.android.exoplayer2.video.VideoSize
+import com.google.android.exoplayer2.ui.PlayerView
+import com.google.android.exoplayer2.ui.StyledPlayerView
 import io.fastpix.data.FastPixAnalytics
-import io.fastpix.data.FastPixDataSDK
 import io.fastpix.data.domain.SDKConfiguration
-import io.fastpix.data.domain.enums.PlayerEventType
 import io.fastpix.data.domain.listeners.PlayerListener
+import io.fastpix.data.domain.model.AdDataDetails
+import io.fastpix.data.domain.model.AdModel
+import io.fastpix.data.domain.model.ApplicationDataDetails
 import io.fastpix.data.domain.model.BandwidthModel
 import io.fastpix.data.domain.model.CustomDataDetails
 import io.fastpix.data.domain.model.ErrorModel
 import io.fastpix.data.domain.model.PlayerDataDetails
 import io.fastpix.data.domain.model.VideoDataDetails
+import io.fastpix.data.domain.model.ViewerDataDetails
 import io.fastpix.data.utils.Logger
+import io.fastpix.exoplayer_data_sdk.ads.AdTracker
+import io.fastpix.exoplayer_data_sdk.events.EventSink
+import io.fastpix.exoplayer_data_sdk.events.PlaybackEventDispatcher
+import io.fastpix.exoplayer_data_sdk.events.PulseScheduler
+import io.fastpix.exoplayer_data_sdk.events.TAG
+import io.fastpix.exoplayer_data_sdk.listeners.AnalyticsEventRouter
+import io.fastpix.exoplayer_data_sdk.listeners.PlayerStateRouter
+import io.fastpix.exoplayer_data_sdk.media.ContentMediaTracker
+import io.fastpix.exoplayer_data_sdk.network.BandwidthMetricDispatcher
+import io.fastpix.exoplayer_data_sdk.network.BandwidthMetricHls
 import io.fastpix.exoplayer_data_sdk.sdkInfo.FastPixExoplayerLibraryInfo
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.io.IOException
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.ceil
+import com.google.ads.interactivemedia.v3.api.AdEvent as ImaAdEvent
 
 /**
  * FastPix ExoPlayer wrapper that automatically integrates with FastPixDataSDK
@@ -55,49 +54,62 @@ class FastPixBaseExoPlayer(
     private val playerDataDetails: PlayerDataDetails? = null,
     private val videoDataDetails: VideoDataDetails? = null,
     private val customDataDetails: CustomDataDetails? = null,
+    private val applicationDataDetails: ApplicationDataDetails? = null,
+    private val viewerDataDetails: ViewerDataDetails? = null,
+    /** The view's ad details from the app's ad server or VAST, sent on viewBegin and viewCompleted */
+    private val adDataDetails: AdDataDetails? = null,
+    /**
+     * Classifies a player error for the app: true for a business rule (geo-block, entitlement),
+     * false for a technical fault, null when the app can't tell. Null classifier = unclassified
+     */
+    private val errorClassifier: ((PlaybackException) -> Boolean?)? = null,
+    /**
+     * Whether the app's player controls are enabled. Needed when the app draws its own controls
+     * (PlayerView use_controller = false); without it a custom UI reports nothing rather than false
+     */
+    private val controlsEnabled: (() -> Boolean?)? = null,
+    /** Whether the app starts playback on its own (playWhenReady at load); null when unknown */
+    private val autoPlay: Boolean? = null,
 ) : PlayerListener {
 
-    private val TAG = "FastPixBaseMedia3Player"
-    private var fastPixDataSDK: FastPixDataSDK? = null
+    /**
+     * The constructor as published in 1.1.4, kept so apps compiled against it still link. Hidden,
+     * so new code resolves to the constructor above
+     */
+    @Deprecated("Kept for binary compatibility with 1.1.4", level = DeprecationLevel.HIDDEN)
+    constructor(
+        context: Context,
+        playerView: View,
+        exoPlayer: ExoPlayer,
+        workSpaceId: String,
+        beaconUrl: String? = null,
+        enableLogging: Boolean = false,
+        playerDataDetails: PlayerDataDetails? = null,
+        videoDataDetails: VideoDataDetails? = null,
+        customDataDetails: CustomDataDetails? = null,
+    ) : this(
+        context, playerView, exoPlayer, workSpaceId, beaconUrl, enableLogging,
+        playerDataDetails, videoDataDetails, customDataDetails, applicationDataDetails = null,
+    )
 
-    // State machine for valid event transitions
-    private var currentEventState: PlayerEvent? = null
-    private val isPulseScheduled = AtomicBoolean(false)
-    private val dispatcherScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private var pulseJob: Job? = null
+    private val playerInstanceId: String = UUID.randomUUID().toString()
+    private val videoIdForLogs: String? get() = videoDataDetails?.videoId
 
-    // Queue for variant change events that need to be deferred until play event
-    private val pendingVariantChangeEvents = mutableListOf<Boolean>()
-
-    // Chunk downloading monitoring
-    private val bandwidthDispatcher = BandwidthMetricDispatcher()
-    private var renditionList: List<ChunkRendition>? = null
-    private var detectMimeType: Boolean = true
-    private var currentTimelineWindow: Timeline.Window = Timeline.Window()
-
-    private var frameRate: Int? = null
-    private var codec: String? = null
-    private var bitRate: String? = null
-    private var mimeType: String? = null
-    private var videoSourceWidth: Int? = null
-    private val PULSE_INTERVAL = 10_000L // 1 second
-    private var videoSourceHeight: Int? = null
-    private var errorCode: String? = null
-    private var errorMessage: String? = null
-    private var playerCodec: String? = null
-    private var isBuffering = false
-    private var videoSourceUrl: String? = null
-    private var isReleased = false
-    private var isSeeking = false
-    private var isEnded = false
-    private var isVideoPlaying = false
+    private val sink = EventSink()
+    private val releaseStarted = AtomicBoolean(false)
+    private val pulse = PulseScheduler(sink)
+    private val playback = PlaybackEventDispatcher(sink, pulse, exoPlayer, enableLogging, errorClassifier)
+    private val media = ContentMediaTracker(exoPlayer, videoDataDetails)
+    private val ads = AdTracker(exoPlayer, sink, onContentResumed = playback::onContentResumed)
+    private val bandwidth = BandwidthMetricDispatcher(sink, BandwidthMetricHls(exoPlayer, media))
 
     init {
-        initializeFastPixSDK()
-    }
-
-    private fun initializeFastPixSDK() {
-        setUpListener()
+        Logger.log(
+            TAG,
+            "SESSION_CREATED: videoId=${videoIdForLogs ?: "none"} playerInstanceId=$playerInstanceId"
+        )
+        exoPlayer.addAnalyticsListener(AnalyticsEventRouter(media, playback, bandwidth, ads))
+        exoPlayer.addListener(PlayerStateRouter(exoPlayer, media, playback, ads, bandwidth))
         val sdkConfiguration = SDKConfiguration(
             workspaceId = workSpaceId,
             beaconUrl = beaconUrl,
@@ -109,594 +121,172 @@ class FastPixBaseExoPlayer(
             playerListener = this,
             enableLogging = enableLogging,
             customData = customDataDetails,
+            applicationData = applicationDataDetails,
+            viewerData = viewerDataDetails,
+            adData = adDataDetails,
         )
         FastPixAnalytics.initialize(sdkConfiguration, context)
-        fastPixDataSDK = FastPixAnalytics.getSDK()
-        dispatchViewBegin()
-        dispatchPlayerReadyEvent()
-        dispatchPlayEvent()
-    }
-
-    private fun dispatchViewBegin() {
-        if (isReleased || fastPixDataSDK == null) return
-        Logger.log(TAG, "PLAYER_EVENT: viewBegin")
-        if (enableLogging) {
-            Log.d(TAG, "Dispatching ViewBegin event")
-        }
-        schedulePulseEvents()
-        fastPixDataSDK?.dispatchEvent(PlayerEventType.viewBegin)
-    }
-
-    private fun dispatchPlayerReadyEvent() {
-        if (isReleased || fastPixDataSDK == null) return
-        Logger.log(TAG, "PLAYER_EVENT: playerReady")
-        if (enableLogging) {
-            Log.d(TAG, "Dispatching Play Ready event")
-        }
-        fastPixDataSDK?.dispatchEvent(PlayerEventType.playerReady)
-    }
-
-    /**
-     * Validates if the transition from current state to new state is valid
-     */
-    private fun isValidTransition(newEvent: PlayerEvent): Boolean {
-        val allowedTransitions = validTransitions[currentEventState] ?: emptySet()
-        return newEvent in allowedTransitions
-    }
-
-    /**
-     * Safely transitions to a new event state if valid
-     */
-    private fun transitionToEvent(newEvent: PlayerEvent): Boolean {
-        if (isValidTransition(newEvent)) {
-            if (newEvent != PlayerEvent.VARIANT_CHANGED) {
-                currentEventState = newEvent
-            }
-            return true
+        // The SDK tracks one player at a time: if another player is already tracked, this one stays
+        // untracked, sends nothing, and never releases the other player's view
+        sink.sdk = FastPixAnalytics.getSDK()?.takeIf { it.isTracking(this) }
+        if (sink.sdk == null) {
+            Logger.logWarning(TAG, "Another player is already tracked; this player is not tracked")
         } else {
-            return false
+            playback.viewBegin()
+            playback.playerReady()
+            // With autoplay off, play waits for the viewer to press play (onIsPlayingChanged)
+            if (exoPlayer.playWhenReady) playback.play()
         }
     }
 
-    private fun setUpListener() {
-        exoPlayer.addAnalyticsListener(object : AnalyticsListener {
-            override fun onVideoDecoderInitialized(
-                eventTime: AnalyticsListener.EventTime,
-                decoderName: String,
-                initializedTimestampMs: Long,
-                initializationDurationMs: Long
-            ) {
-                playerCodec = decoderName
-            }
+    // Ads
 
-            override fun onVideoInputFormatChanged(
-                eventTime: AnalyticsListener.EventTime,
-                format: Format,
-                decoderReuseEvaluation: DecoderReuseEvaluation?
-            ) {
-                bitRate = format.bitrate.takeIf { it > 0 }.toString()
-                frameRate = format.frameRate.takeIf { it > 0 }?.toInt()
-                videoSourceWidth = format.width
-                videoSourceHeight = format.height
-            }
-
-            // Chunk downloading monitoring methods
-            override fun onLoadStarted(
-                eventTime: AnalyticsListener.EventTime,
-                loadEventInfo: LoadEventInfo,
-                mediaLoadData: MediaLoadData
-            ) {
-                if (loadEventInfo.uri != null) {
-                    var segmentMimeType = "unknown"
-                    var segmentWidth = 0
-                    var segmentHeight = 0
-                    if (mediaLoadData.trackFormat != null) {
-                        val format = mediaLoadData.trackFormat
-                        if (format!!.sampleMimeType != null) {
-                            segmentMimeType = format.sampleMimeType!!
-                        }
-                        segmentWidth = format.width
-                        segmentHeight = format.height
-                    }
-                    try {
-                        if (videoSourceUrl != null) {
-                            videoSourceUrl = loadEventInfo.uri.toString()
-                        }
-                        val fullUri = loadEventInfo.uri.toString()
-                        val hostWithScheme = "https://${loadEventInfo.uri.host}"
-                        val encodedPath = fullUri.removePrefix(hostWithScheme)
-                        bandwidthDispatcher.onLoadStarted(
-                            loadEventInfo.loadTaskId,
-                            mediaLoadData.mediaStartTimeMs,
-                            mediaLoadData.mediaEndTimeMs,
-                            encodedPath,
-                            mediaLoadData.dataType,
-                            loadEventInfo.uri.host,
-                            segmentMimeType,
-                            segmentWidth,
-                            segmentHeight
-                        )
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error handling load started: ${e.message}")
-                    }
-                }
-            }
-
-            override fun onLoadCompleted(
-                eventTime: AnalyticsListener.EventTime,
-                loadEventInfo: LoadEventInfo,
-                mediaLoadData: MediaLoadData
-            ) {
-                try {
-                    var segmentMimeType = "unknown"
-                    if (mediaLoadData.trackFormat != null) {
-                        val format = mediaLoadData.trackFormat
-                        if (format!!.sampleMimeType != null) {
-                            segmentMimeType = format.sampleMimeType!!
-                        }
-                    }
-                    val fullUri = loadEventInfo.uri.toString()
-                    val hostWithScheme = "https://${loadEventInfo.uri.host}"
-                    val encodedPath = fullUri.removePrefix(hostWithScheme)
-                    bandwidthDispatcher.onLoadCompleted(
-                        loadEventInfo.loadTaskId,
-                        encodedPath,
-                        loadEventInfo.bytesLoaded,
-                        mediaLoadData.trackFormat,
-                        loadEventInfo.responseHeaders,
-                        mediaLoadData.dataType,
-                        loadEventInfo.uri.host,
-                        segmentMimeType
-                    )
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error handling load completed: ${e.message}")
-                }
-            }
-
-            override fun onLoadCanceled(
-                eventTime: AnalyticsListener.EventTime,
-                loadEventInfo: LoadEventInfo,
-                mediaLoadData: MediaLoadData
-            ) {
-                if (loadEventInfo.uri != null) {
-                    try {
-                        val fullUri = loadEventInfo.uri.toString()
-                        val host = loadEventInfo.uri.host
-                        val hostWithScheme = "https://${host}"
-                        val encodedPath = fullUri.removePrefix(hostWithScheme)
-                        bandwidthDispatcher.onLoadCanceled(
-                            loadEventInfo.loadTaskId,
-                            encodedPath,
-                            host,
-                            loadEventInfo.responseHeaders
-                        )
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error handling load canceled: ${e.message}")
-                    }
-                }
-            }
-
-            override fun onLoadError(
-                eventTime: AnalyticsListener.EventTime,
-                loadEventInfo: LoadEventInfo,
-                mediaLoadData: MediaLoadData,
-                error: IOException,
-                wasCanceled: Boolean
-            ) {
-                try {
-                    val fullUri = loadEventInfo.uri.toString()
-                    val hostWithScheme = "https://${loadEventInfo.uri.host}"
-                    val encodedPath = fullUri.removePrefix(hostWithScheme)
-                    bandwidthDispatcher.onLoadError(
-                        loadEventInfo.loadTaskId,
-                        encodedPath,
-                        error
-                    )
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error handling load error: ${e.message}")
-                }
-            }
-        })
-
-
-
-        exoPlayer.addListener(object : Player.Listener {
-
-            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                if (videoSourceUrl != null) {
-                    mediaItem?.localConfiguration?.uri?.let {
-                        videoSourceUrl = it.toString()
-                    }
-                }
-            }
-
-            override fun onTimelineChanged(timeline: Timeline, reason: Int) {
-                if (videoSourceUrl != null) {
-                    exoPlayer.currentMediaItem?.localConfiguration?.uri?.let {
-                        videoSourceUrl = it.toString()
-                    }
-                }
-            }
-
-            override fun onVideoSizeChanged(videoSize: VideoSize) {
-                super.onVideoSizeChanged(videoSize)
-                if (videoSize.height > 0 && videoSize.width > 0) {
-                    videoSourceWidth = videoSize.width
-                    videoSourceHeight = videoSize.height
-                    dispatchVariantChangeEvent()
-                }
-            }
-
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                super.onPlaybackStateChanged(playbackState)
-
-                when (playbackState) {
-                    Player.STATE_READY -> {
-                        isVideoPlaying = true
-                        videoSourceHeight = exoPlayer.videoSize.height
-                        videoSourceWidth = exoPlayer.videoSize.width
-                        if (isBuffering) {
-                            isBuffering = false
-                            dispatchBufferedEvent()
-                            dispatchPlayingEvent()
-                        }
-                        if (isSeeking) {
-                            isSeeking = false
-                            dispatchSeekedEvent()
-                        }
-                    }
-
-                    Player.STATE_BUFFERING -> {
-                        if (!isSeeking && !isBuffering) {
-                            isBuffering = true
-                            dispatchBufferingEvent()
-                        }
-                    }
-
-                    Player.STATE_IDLE -> {
-                        dispatchPauseEvent()
-                    }
-
-                    Player.STATE_ENDED -> {
-                        isEnded = true
-                        dispatchPauseEvent(exoPlayer.duration.toInt())
-                        dispatchEndedEvent(exoPlayer.duration.toInt())
-                    }
-                }
-
-            }
-
-            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-                super.onPlayWhenReadyChanged(playWhenReady, reason)
-                if (!playWhenReady) {
-                    dispatchPauseEvent()
-                }
-            }
-
-
-            override fun onPositionDiscontinuity(
-                oldPosition: Player.PositionInfo,
-                newPosition: Player.PositionInfo,
-                reason: Int
-            ) {
-                super.onPositionDiscontinuity(oldPosition, newPosition, reason)
-                if (!isSeeking && reason == Player.DISCONTINUITY_REASON_SEEK) {
-                    isSeeking = true
-                    val currentSeekPosition = oldPosition.positionMs.toInt()
-                    if (isVideoPlaying) {
-                        dispatchPauseEvent(currentSeekPosition)
-                    }
-                    dispatchSeekingEvent(currentSeekPosition)
-                }
-            }
-
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                if (isPlaying) {
-                    isVideoPlaying = true
-                    if (currentEventState != PlayerEvent.SEEKED) {
-                        dispatchPlayEvent()
-                    }
-                    if (isSeeking) {
-                        isSeeking = true
-                        dispatchSeekedEvent()
-                    }
-                    if (isBuffering) {
-                        isBuffering = false
-                        dispatchBufferedEvent()
-                    }
-                    dispatchPlayingEvent()
-                } else {
-                    isVideoPlaying = false
-                    dispatchPauseEvent()
-                }
-            }
-
-
-            override fun onTracksChanged(tracks: Tracks) {
-                super.onTracksChanged(tracks)
-                try {
-                    val trackGroups = tracks.groups.map { it.mediaTrackGroup }
-                    if (trackGroups.isNotEmpty()) {
-                        mimeType = trackGroups[0].getFormat(0).containerMimeType
-                    }
-                    bandwidthDispatcher.onTracksChanged(trackGroups)
-                } catch (ex: Exception) {
-                    mimeType = null
-                }
-            }
-
-            override fun onPlayerError(error: PlaybackException) {
-                super.onPlayerError(error)
-
-                // Detect Error event: can happen from any state
-                if (currentEventState != PlayerEvent.ERROR) {
-                    dispatchErrorEvent(error)
-                }
-            }
-        })
-    }
-
-    private fun dispatchPlayEvent() {
-        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
-        if (transitionToEvent(PlayerEvent.PLAY)) {
-            Logger.log(TAG, "PLAYER_EVENT: play")
-            if (enableLogging) {
-                Log.d(TAG, "Dispatching Play event")
-            }
-            schedulePulseEvents()
-            fastPixDataSDK?.dispatchEvent(PlayerEventType.play)
-            // Process any queued variant change events after play event
-            processQueuedVariantChangeEvents()
-        }
-    }
-
-    private fun dispatchPlayingEvent() {
-        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
-        if (transitionToEvent(PlayerEvent.PLAYING)) {
-            Logger.log(TAG, "PLAYER_EVENT: playing")
-            if (enableLogging) {
-                Log.d(TAG, "Dispatching Playing event")
-            }
-            schedulePulseEvents()
-            fastPixDataSDK?.dispatchEvent(PlayerEventType.playing)
-        }
-    }
-
-    private fun dispatchPauseEvent(currentPosition: Int? = null) {
-        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
-        if (transitionToEvent(PlayerEvent.PAUSE)) {
-            Logger.log(TAG, "PLAYER_EVENT: pause position=${currentPosition ?: "none"}")
-            if (enableLogging) {
-                Log.d(TAG, "Dispatching Pause event")
-            }
-            // Note: There's no Pause event type in PlayerEventType enum
-            // For now, we'll just track the state transition without dispatching
-            // You may need to add a Pause event type to PlayerEventType enum
-            cancelPulseEvent()
-            if (currentPosition != null) {
-                fastPixDataSDK?.dispatchEvent(PlayerEventType.pause, currentPosition)
-            } else {
-                fastPixDataSDK?.dispatchEvent(PlayerEventType.pause)
-            }
-        }
-    }
-
-    private fun dispatchSeekingEvent(currentPosition: Int? = null) {
-        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
-        if (transitionToEvent(PlayerEvent.SEEKING)) {
-            if (enableLogging) {
-                Log.d(TAG, "Dispatching Seeking event")
-            }
-            // Temporarily set currentPosition to seeking start position for the seeking event
-            fastPixDataSDK?.dispatchEvent(PlayerEventType.seeking, currentPosition)
-        }
-    }
-
-    private fun dispatchSeekedEvent() {
-        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
-        if (transitionToEvent(PlayerEvent.SEEKED)) {
-            if (enableLogging) {
-                Log.d(TAG, "Dispatching Seeked event")
-            }
-            if (exoPlayer.isPlaying == false) {
-                cancelPulseEvent()
-            } else {
-                schedulePulseEvents()
-            }
-            fastPixDataSDK?.dispatchEvent(PlayerEventType.seeked)
-        }
-    }
-
-    private fun dispatchBufferingEvent() {
-        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
-        if (transitionToEvent(PlayerEvent.BUFFERING)) {
-            Logger.log(TAG, "PLAYER_EVENT: buffering_start")
-            if (enableLogging) {
-                Log.d(TAG, "Dispatching Buffering event")
-            }
-            schedulePulseEvents()
-            fastPixDataSDK?.dispatchEvent(PlayerEventType.buffering)
-        }
-    }
-
-    private fun dispatchBufferedEvent() {
-        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
-        if (transitionToEvent(PlayerEvent.BUFFERED)) {
-            Logger.log(TAG, "PLAYER_EVENT: buffering_end")
-            if (enableLogging) {
-                Log.d(TAG, "Dispatching Buffered event")
-            }
-            fastPixDataSDK?.dispatchEvent(PlayerEventType.buffered)
-        }
-    }
-
-    private fun dispatchEndedEvent(currentPosition: Int? = null) {
-        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
-        if (transitionToEvent(PlayerEvent.ENDED)) {
-            Logger.log(TAG, "PLAYER_EVENT: ended position=${currentPosition ?: "none"}")
-            if (enableLogging) {
-                Log.d(TAG, "Dispatching Ended event")
-            }
-            cancelPulseEvent()
-            if (currentPosition != null) {
-                fastPixDataSDK?.dispatchEvent(PlayerEventType.ended, currentPosition)
-            } else {
-                fastPixDataSDK?.dispatchEvent(PlayerEventType.ended)
-            }
-        }
-    }
-
-    private fun dispatchVariantChangeEvent() {
-        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
-        if (transitionToEvent(PlayerEvent.VARIANT_CHANGED)) {
-            if (enableLogging) {
-                Log.d(TAG, "Dispatching VariantChange event")
-            }
-            fastPixDataSDK?.dispatchEvent(PlayerEventType.variantChanged)
-        } else {
-            pendingVariantChangeEvents.add(true)
-        }
-    }
-
-    private fun dispatchErrorEvent(error: PlaybackException) {
-        if (isReleased || fastPixDataSDK?.isInitialized() == false) return
-        if (transitionToEvent(PlayerEvent.ERROR)) {
-            if (enableLogging) {
-                Log.d(TAG, "Dispatching Error event: ${error.message}")
-            }
-            cancelPulseEvent()
-            errorCode = error.errorCode.toString()
-            errorMessage = "${error.cause}"
-            fastPixDataSDK?.dispatchEvent(PlayerEventType.error)
-        }
-    }
+    /** Call when the player requests ads (an IMA ad tag or VMAP) for the current media item */
+    fun onAdsRequested(tagUrl: String) = ads.onAdsRequested(tagUrl)
 
     /**
-     * Process any queued variant change events that were deferred until after play event
+     * Forward from ImaAdsLoader.Builder.setAdEventListener. IMA contributes the VAST metadata and
+     * its own impression; breaks and ads themselves are read from the player
      */
-    private fun processQueuedVariantChangeEvents() {
-        if (pendingVariantChangeEvents.isNotEmpty()) {
-            pendingVariantChangeEvents.clear()
-            dispatchVariantChangeEvent()
+    fun onImaAdEvent(event: ImaAdEvent) = ads.onImaAdEvent(event)
+
+    /** Forward from ImaAdsLoader.Builder.setAdErrorListener */
+    fun onImaAdError(event: AdErrorEvent) = ads.onImaAdError(event)
+
+    fun release() {
+        // release() is final. Core releases whichever player it tracks at the time, so a second
+        // call must not reach it: it would end the view of a player tracked since. Atomic, so two
+        // calls at the same moment release at most once
+        if (!releaseStarted.compareAndSet(false, true)) return
+        Logger.log(
+            TAG,
+            "onPlayerRelease(): begin playerInstanceId=$playerInstanceId videoId=${videoIdForLogs ?: "none"}"
+        )
+        sink.isReleased = true
+        pulse.cancel()
+        if (sink.sdk != null) {
+            FastPixAnalytics.release()
         }
+        media.reset()
+        playback.reset()
+        bandwidth.reset()
+        Logger.log(TAG, "onPlayerRelease(): complete")
     }
 
+    // PlayerListener: what the SDK reads from the player when it builds a beacon
 
-    override fun playerHeight(): Int? {
-        val density = context.resources.displayMetrics.density
-        val rawHeight = playerView.height
-        val height = ceil(rawHeight / density)
-        return height.toInt()
-    }
+    override fun playerHeight(): Int? = ceil(playerView.height / context.resources.displayMetrics.density).toInt()
 
-    override fun playerWidth(): Int? {
-        val density = context.resources.displayMetrics.density
-        val rawWidth = playerView.width
-        val width = ceil(rawWidth / density)
-        return width.toInt()
-    }
+    override fun playerWidth(): Int? = ceil(playerView.width / context.resources.displayMetrics.density).toInt()
 
-    override fun videoSourceWidth(): Int? = videoSourceWidth
+    override fun videoSourceWidth(): Int? = media.videoSourceWidth
 
-    override fun videoSourceHeight(): Int? = videoSourceHeight
+    override fun videoSourceHeight(): Int? = media.videoSourceHeight
 
-    override fun playHeadTime(): Int? = exoPlayer.currentPosition.toInt()
+    /**
+     * The content playhead. During an ad, currentPosition is the position inside the ad, which
+     * content metrics (playback time, seeks, scaling) would read as content jumping around;
+     * contentPosition holds the content position where the break interrupts it
+     */
+    override fun playHeadTime(): Int? = exoPlayer.contentPosition.toInt()
 
-    override fun mimeType(): String? =
-        mimeType ?: exoPlayer.currentMediaItem?.localConfiguration?.mimeType
+    override fun mimeType(): String? = media.mimeType()
 
-    override fun sourceFps(): Int? = frameRate
+    override fun sourceFps(): Int? = media.frameRate
 
-    override fun sourceAdvertisedBitrate(): String? = bitRate
+    override fun sourceAdvertisedBitrate(): String? = media.bitRate
 
-    override fun sourceAdvertiseFrameRate(): Int? = frameRate
+    override fun sourceAdvertiseFrameRate(): Int? = media.frameRate
 
-    override fun sourceDuration(): Int? = exoPlayer.duration.toInt()
+    override fun declaredFrameRate(): Double? = media.declaredFrameRate
+
+    /** Null until the source has a known duration (C.TIME_UNSET would narrow to 1) */
+    override fun sourceDuration(): Int? =
+        exoPlayer.duration.takeIf { it != C.TIME_UNSET && it > 0 }?.toInt()
 
     override fun isPause(): Boolean? = !exoPlayer.isPlaying
 
-    override fun isAutoPlay(): Boolean? = false
-    override fun preLoad(): Boolean? {
-        return false
-    }
+    override fun isAutoPlay(): Boolean? = autoPlay
+
+    override fun preLoad(): Boolean? = false
 
     override fun isBuffering(): Boolean? = exoPlayer.playbackState == Player.STATE_BUFFERING
 
-    override fun playerCodec(): String? = playerCodec
+    override fun playerCodec(): String? = media.playerCodec
 
     override fun sourceHostName(): String? =
         exoPlayer.currentMediaItem?.localConfiguration?.uri.toString()
 
-    override fun getPlayerError(): ErrorModel = ErrorModel(errorCode, errorMessage)
+    override fun getPlayerError(): ErrorModel = playback.playerError()
 
-    override fun getVideoCodec(): String? = codec
-    override fun getSoftwareName(): String? {
-        return FastPixExoplayerLibraryInfo.SDK_NAME
-    }
+    override fun getVideoCodec(): String? = media.codec
 
-    override fun getSoftwareVersion(): String? {
-        return FastPixExoplayerLibraryInfo.SDK_VERSION
-    }
+    override fun getSoftwareName(): String? = FastPixExoplayerLibraryInfo.SDK_NAME
 
-    override fun isLive(): Boolean? =
-        exoPlayer.isCurrentMediaItemLive // This is a sample video, not live
+    override fun getSoftwareVersion(): String? = FastPixExoplayerLibraryInfo.SDK_VERSION
 
-    override fun sourceUrl(): String? =
-        videoSourceUrl ?: exoPlayer.currentMediaItem?.localConfiguration?.uri.toString()
+    override fun isLive(): Boolean? = exoPlayer.isCurrentMediaItemLive
 
-    override fun isFullScreen(): Boolean? {
-        val orientation = context.resources.configuration.orientation
-        return orientation == Configuration.ORIENTATION_LANDSCAPE
-    }
-
-    override fun getBandWidthData(): BandwidthModel {
-        val bandWidthModel = BandwidthModel()
-        bandWidthModel.requestId = chunkDownloadData?.requestId
-        // Only construct URL if both host and path are available
-        val hostName = chunkDownloadData?.requestHostName
-        val requestUrl = chunkDownloadData?.requestUrl
-        bandWidthModel.requestUrl = if (hostName != null && requestUrl != null) {
-            "https://${hostName}${requestUrl}"
-        } else {
-            null
-        }
-        bandWidthModel.requestMethod = chunkDownloadData?.requestType
-        bandWidthModel.requestResponseHeaders = chunkDownloadData?.requestResponseHeaders
-        bandWidthModel.requestResponseCode = chunkDownloadData?.requestErrorCode.toString()
-        bandWidthModel.requestResponseSize = chunkDownloadData?.requestBytesLoaded.toString()
-        bandWidthModel.requestErrorCode = chunkDownloadData?.requestErrorCode.toString()
-        bandWidthModel.requestHostName = chunkDownloadData?.requestHostName
-        bandWidthModel.requestCancel = chunkDownloadData?.requestCancel
-        bandWidthModel.requestErrorText = chunkDownloadData?.requestErrorText
-        return bandWidthModel
-    }
-
-    fun release() {
-        isReleased = true
-        cancelPulseEvent()
-        if (fastPixDataSDK != null) {
-            FastPixAnalytics.release()
-        }
-        mimeType = null
-        frameRate = null
-        playerCodec = null
-        currentEventState = null
-        isEnded = false
-        videoSourceHeight = null
-        videoSourceWidth = null
-        detectMimeType = false
-        renditionList = null
-        codec = null
-        bitRate = null
-        errorCode = null
-        errorMessage = null
-        pendingVariantChangeEvents.clear()
-        Logger.log(TAG, "onPlayerRelease(): complete")
-    }
+    override fun sourceUrl(): String? = media.sourceUrl()
 
     /**
-     * Data class for chunk rendition information
+     * Fullscreen means the player fills the window, whatever the orientation: a landscape phone
+     * with a small player is not fullscreen. Reading the orientation instead lagged a pulse behind
+     * entering and leaving fullscreen. Null before the player is laid out
      */
+    override fun isFullScreen(): Boolean? {
+        val root = playerView.rootView ?: return null
+        if (playerView.width <= 0 || root.width <= 0) return null
+        return playerView.width >= root.width * 0.95 && playerView.height >= root.height * 0.9
+    }
+
+    // ExoPlayer has no mute flag of its own: Player.mute() sets the volume to 0, so that is its mute state
+    override fun isMuted(): Boolean? = exoPlayer.volume == 0f
+
+    override fun volumeLevel(): Double? = exoPlayer.volume.toDouble()
+
+    override fun playbackRate(): Double? = exoPlayer.playbackParameters.speed.toDouble()
+
+    override fun isLooping(): Boolean? = exoPlayer.repeatMode != Player.REPEAT_MODE_OFF
+
+    // useController = false can mean "custom controls", so only true is trusted from the player view
+    override fun areControlsEnabled(): Boolean? =
+        controlsEnabled?.invoke() ?: viewUsesController()?.takeIf { it }
+
+    /** ExoPlayer 2.19.1 has two player views: StyledPlayerView and the older PlayerView */
+    @Suppress("DEPRECATION")
+    private fun viewUsesController(): Boolean? = when (playerView) {
+        is StyledPlayerView -> playerView.useController
+        is PlayerView -> playerView.useController
+        else -> null
+    }
+
+    override fun isPictureInPicture(): Boolean? = context.findActivity()?.isInPictureInPictureMode
+
+    override fun isSubtitlesOn(): Boolean? = media.viewerSubtitleFormat() != null
+
+    override fun subtitlesLanguageCode(): String? = media.viewerSubtitleFormat()?.language
+
+    override fun audioLanguageCode(): String? = media.contentFormat(C.TRACK_TYPE_AUDIO)?.language
+
+    override fun bufferLength(): Long? =
+        (exoPlayer.bufferedPosition - exoPlayer.currentPosition).coerceAtLeast(0L)
+
+    override fun programDateTime(): Long? = media.programDateTime()
+
+    override fun audioCodec(): String? = media.contentFormat(C.TRACK_TYPE_AUDIO)?.codecs
+
+    override fun audioBitrate(): Int? = media.audioBitrate()
+
+    override fun dynamicRangeType(): String? = media.dynamicRangeType()
+
+    override fun renditionName(): String? = media.renditionName()
+
+    override fun currentAd(): AdModel? = ads.currentAd()
+
+    override fun getBandWidthData(): BandwidthModel = bandwidth.bandwidthModel()
+    /** Public before 1.1.5, kept so apps that referenced it still compile and link */
+    @Deprecated("Not used by the SDK; will be removed in the next major version")
     data class ChunkRendition(
         var bitrate: Long = 0,
         var width: Int = 0,
@@ -705,9 +295,9 @@ class FastPixBaseExoPlayer(
         var fps: Int = 0
     )
 
-    /**
-     * Data class for chunk download information
-     */
+    /** Public before 1.1.5, kept so apps that referenced it still compile and link */
+    @Deprecated("Not used by the SDK; will be removed in the next major version")
+    @Suppress("DEPRECATION")
     data class ChunkDownloadData(
         var loadTaskId: Long = 0,
         var requestResponseStart: Long = 0,
@@ -730,465 +320,10 @@ class FastPixBaseExoPlayer(
         var requestResponseHeaders: Map<String, String>? = null,
         var requestRenditionLists: List<ChunkRendition>? = null
     )
+}
 
-    /**
-     * BandwidthMetric class for tracking individual chunk downloads
-     */
-    internal open inner class BandwidthMetric {
-        var availableTracks: List<TrackGroup>? = null
-        var loadedSegments: HashMap<Long, ChunkDownloadData> = HashMap()
-
-        open fun onLoadError(
-            loadTaskId: Long,
-            e: IOException,
-            segmentUrl: String?
-        ): ChunkDownloadData {
-            var segmentData: ChunkDownloadData? = loadedSegments[loadTaskId]
-            if (segmentData == null) {
-                segmentData = ChunkDownloadData(loadTaskId = loadTaskId)
-            }
-            segmentData.requestError = e.toString()
-            segmentData.requestErrorCode = -1
-            segmentData.requestErrorText = e.message
-            segmentData.requestResponseEnd = System.currentTimeMillis()
-            return segmentData
-        }
-
-        open fun onLoadCanceled(
-            loadTaskId: Long,
-            segmentUrl: String?,
-            host: String?
-        ): ChunkDownloadData {
-            var segmentData: ChunkDownloadData? = loadedSegments[loadTaskId]
-            if (segmentData == null) {
-                segmentData = ChunkDownloadData(loadTaskId = loadTaskId)
-            }
-            // Set requestUrl and requestHostName if they're not already set
-            if (segmentData.requestUrl == null && segmentUrl != null) {
-                segmentData.requestUrl = segmentUrl
-            }
-            if (segmentData.requestHostName == null && host != null) {
-                segmentData.requestHostName = host
-            }
-            segmentData.requestCancel = "genericLoadCanceled"
-            segmentData.requestResponseEnd = System.currentTimeMillis()
-            return segmentData
-        }
-
-        protected fun onLoad(
-            loadTaskId: Long,
-            mediaStartTimeMs: Long,
-            mediaEndTimeMs: Long,
-            segmentUrl: String?,
-            dataType: Int,
-            host: String?,
-            segmentMimeType: String
-        ): ChunkDownloadData {
-            synchronized(currentTimelineWindow) {
-                try {
-                    exoPlayer.currentTimeline.getWindow(
-                        exoPlayer.currentWindowIndex, currentTimelineWindow
-                    )
-                } catch (e: IllegalStateException) {
-                    Log.e(
-                        "ChunkDownloadData",
-                        "Player is in an invalid state: ${e.message}",
-                        e
-                    )
-                }
-            }
-
-            val segmentData = ChunkDownloadData(
-                loadTaskId = loadTaskId,
-                requestResponseStart = System.currentTimeMillis(),
-                requestMediaStartTime = mediaStartTimeMs,
-                requestVideoWidth = videoSourceWidth,
-                requestVideoHeight = videoSourceHeight,
-                requestUrl = segmentUrl,
-                requestHostName = host,
-                requestRenditionLists = renditionList
-            )
-
-            if (dataType == C.DATA_TYPE_MANIFEST) {
-                detectMimeType = false
-                segmentData.requestType = "manifest"
-            } else if (dataType == C.DATA_TYPE_MEDIA_INITIALIZATION) {
-                if (segmentMimeType.contains("video")) {
-                    segmentData.requestType = "video_init"
-                } else if (segmentMimeType.contains("audio")) {
-                    segmentData.requestType = "audio_init"
-                }
-            } else if (dataType == C.DATA_TYPE_MEDIA) {
-                segmentData.requestType = "media"
-                segmentData.requestMediaDuration = mediaEndTimeMs - mediaStartTimeMs
-            } else {
-                Log.e("BandwidthMetricDefault", "default")
-            }
-            loadedSegments[loadTaskId] = segmentData
-            return segmentData
-        }
-
-        fun onLoadStarted(
-            loadTaskId: Long,
-            mediaStartTimeMs: Long,
-            mediaEndTimeMs: Long,
-            segmentUrl: String?,
-            dataType: Int,
-            host: String?,
-            segmentMimeType: String
-        ): ChunkDownloadData {
-            val loadData = onLoad(
-                loadTaskId,
-                mediaStartTimeMs,
-                mediaEndTimeMs,
-                segmentUrl,
-                dataType,
-                host,
-                segmentMimeType
-            )
-            loadData.requestResponseStart = System.currentTimeMillis()
-            return loadData
-        }
-
-        open fun onLoadCompleted(
-            loadTaskId: Long,
-            segmentUrl: String?,
-            bytesLoaded: Long,
-            trackFormat: Format?
-        ): ChunkDownloadData? {
-            val segmentData: ChunkDownloadData = loadedSegments[loadTaskId] ?: return null
-            segmentData.requestBytesLoaded = bytesLoaded
-            segmentData.requestResponseEnd = System.currentTimeMillis()
-
-            if (trackFormat != null && availableTracks != null) {
-                availableTracks?.let { tracksList ->
-                    for (tracks in tracksList) {
-                        for (trackGroupIndex in 0 until tracks.length) {
-                            val currentFormat = tracks.getFormat(trackGroupIndex)
-                            if (trackFormat.width == currentFormat.width &&
-                                trackFormat.height == currentFormat.height &&
-                                trackFormat.bitrate == currentFormat.bitrate
-                            ) {
-                                segmentData.requestCurrentLevel = trackGroupIndex
-                            }
-                        }
-                    }
-                }
-            }
-            loadedSegments.remove(loadTaskId)
-            return segmentData
-        }
-    }
-
-    /**
-     * HLS-specific bandwidth metric implementation
-     */
-    internal inner class BandwidthMetricHls : BandwidthMetric() {
-        override fun onLoadError(
-            loadTaskId: Long,
-            e: IOException,
-            segmentUrl: String?
-        ): ChunkDownloadData {
-            val loadData: ChunkDownloadData =
-                super.onLoadError(loadTaskId, e, segmentUrl)
-            return loadData
-        }
-
-        override fun onLoadCanceled(
-            loadTaskId: Long,
-            segmentUrl: String?,
-            host: String?
-        ): ChunkDownloadData {
-            val loadData: ChunkDownloadData =
-                super.onLoadCanceled(loadTaskId, segmentUrl, host)
-            loadData.requestCancel = "FragLoadEmergencyAborted"
-            return loadData
-        }
-
-        override fun onLoadCompleted(
-            loadTaskId: Long,
-            segmentUrl: String?,
-            bytesLoaded: Long,
-            trackFormat: Format?
-        ): ChunkDownloadData? {
-            val loadData: ChunkDownloadData? =
-                super.onLoadCompleted(loadTaskId, segmentUrl, bytesLoaded, trackFormat)
-            if (trackFormat != null && loadData != null) {
-                loadData.requestLabeledBitrate = trackFormat.bitrate
-            }
-            return loadData
-        }
-    }
-
-    private var chunkDownloadData: ChunkDownloadData? = null
-
-    /**
-     * BandwidthMetricDispatcher handles chunk downloading events and dispatches them
-     */
-    internal inner class BandwidthMetricDispatcher {
-        private val bandwidthMetricHls: BandwidthMetric = BandwidthMetricHls()
-        var allowedHeaders: ArrayList<String> = ArrayList()
-        private var requestSegmentDuration: Long = 1000
-        private var lastRequestSentAt: Long = -1
-        private var maxNumberOfEventsPerSegmentDuration: Int = 10
-        private var numberOfRequestCompletedBeaconsSentPerSegment: Int = 0
-        private var numberOfRequestCancelBeaconsSentPerSegment: Int = 0
-        private var numberOfRequestFailedBeaconsSentPerSegment: Int = 0
-
-        init {
-            allowedHeaders.add("x-cdn")
-            allowedHeaders.add("content-type")
-            allowedHeaders.add("server")
-            allowedHeaders.add("x-request-id")
-        }
-
-        fun currentBandwidthMetric(): BandwidthMetric = bandwidthMetricHls
-
-        fun onLoadError(
-            loadTaskId: Long,
-            segmentUrl: String?,
-            e: IOException
-        ) {
-            val loadData: ChunkDownloadData = currentBandwidthMetric().onLoadError(
-                loadTaskId,
-                e,
-                segmentUrl
-            )
-            dispatchChunkEvent(REQUEST_FAILED, loadData)
-        }
-
-        fun onLoadCanceled(
-            loadTaskId: Long,
-            segmentUrl: String?,
-            host: String?,
-            headers: Map<String, List<String>>
-        ) {
-            val loadData: ChunkDownloadData = currentBandwidthMetric().onLoadCanceled(
-                loadTaskId,
-                segmentUrl,
-                host
-            )
-            parseHeaders(loadData, headers)
-            dispatchChunkEvent(REQUEST_CANCELLED, loadData)
-        }
-
-        fun onLoadStarted(
-            loadTaskId: Long,
-            mediaStartTimeMs: Long,
-            mediaEndTimeMs: Long,
-            segmentUrl: String?,
-            dataType: Int,
-            host: String?,
-            segmentMimeType: String,
-            segmentWidth: Int,
-            segmentHeight: Int
-        ) {
-            currentBandwidthMetric().onLoadStarted(
-                loadTaskId,
-                mediaStartTimeMs,
-                mediaEndTimeMs,
-                segmentUrl,
-                dataType,
-                host,
-                segmentMimeType
-            )
-        }
-
-        fun onLoadCompleted(
-            loadTaskId: Long,
-            segmentUrl: String?,
-            bytesLoaded: Long,
-            trackFormat: Format?,
-            responseHeaders: Map<String, List<String>>,
-            dataType: Int,
-            host: String?,
-            segmentMimeType: String
-        ) {
-            val loadData: ChunkDownloadData? = currentBandwidthMetric().onLoadCompleted(
-                loadTaskId,
-                segmentUrl,
-                bytesLoaded,
-                trackFormat
-            )
-            if (loadData != null) {
-                parseHeaders(loadData, responseHeaders)
-                dispatchChunkEvent(REQUEST_COMPLETED, loadData)
-            }
-        }
-
-        private fun parseHeaders(
-            loadData: ChunkDownloadData,
-            responseHeaders: Map<String, List<String>>
-        ) {
-            val headers: Map<String, String>? = parseHeaders(responseHeaders)
-            if (headers != null) {
-                loadData.requestId = headers["x-request-id"]
-                loadData.requestResponseHeaders = headers
-            }
-        }
-
-        fun onTracksChanged(trackGroups: List<TrackGroup>) {
-            currentBandwidthMetric().availableTracks = trackGroups
-            for (trackGroup in trackGroups) {
-                if (0 < trackGroup.length) {
-                    var trackFormat = trackGroup.getFormat(0)
-                    if (trackFormat.containerMimeType != null && trackFormat.containerMimeType!!.contains(
-                            "video"
-                        )
-                    ) {
-                        val renditions: MutableList<ChunkRendition> = ArrayList()
-                        for (i in 0 until trackGroup.length) {
-                            trackFormat = trackGroup.getFormat(i)
-                            val rendition = ChunkRendition(
-                                bitrate = trackFormat.bitrate.toLong(),
-                                width = trackFormat.width,
-                                height = trackFormat.height,
-                                codec = trackFormat.codecs,
-                                fps = trackFormat.frameRate.toInt()
-                            )
-                            renditions.add(rendition)
-                        }
-                        renditionList = renditions
-                    }
-                }
-            }
-        }
-
-        private fun dispatchChunkEvent(eventType: String, data: ChunkDownloadData) {
-            if (shouldDispatchEvent(data, eventType)) {
-                when (eventType) {
-                    REQUEST_FAILED -> {
-                        dispatchRequestFailed(data)
-                    }
-
-                    REQUEST_CANCELLED -> {
-                        dispatchRequestCancelled(data)
-                    }
-
-                    REQUEST_COMPLETED -> {
-                        dispatchRequestCompleted(data)
-                    }
-                }
-            }
-        }
-
-        private fun dispatchRequestCompleted(data: ChunkDownloadData) {
-            if (isReleased || fastPixDataSDK?.isInitialized() == false) return
-            chunkDownloadData = data
-            fastPixDataSDK?.dispatchEvent(PlayerEventType.requestCompleted)
-        }
-
-        private fun dispatchRequestCancelled(data: ChunkDownloadData) {
-            if (isReleased || fastPixDataSDK?.isInitialized() == false) return
-            // Set chunkDownloadData before dispatching to ensure data is available
-            // even if SDK state is cleared during release
-            chunkDownloadData = data
-            // Capture bandwidth data synchronously before dispatch to avoid race condition
-            // during SDK release. Store it in SDKStateService so event builder can access it
-            // even if playerListener is cleared during release
-            fastPixDataSDK?.dispatchEvent(PlayerEventType.requestCanceled)
-        }
-
-        private fun dispatchRequestFailed(data: ChunkDownloadData) {
-            if (isReleased || fastPixDataSDK?.isInitialized() == false) return
-            chunkDownloadData = data
-            fastPixDataSDK?.dispatchEvent(PlayerEventType.requestFailed)
-        }
-
-        private fun parseHeaders(responseHeaders: Map<String, List<String>>): Map<String, String> {
-            if (responseHeaders.isEmpty()) {
-                return emptyMap()
-            }
-            val headers: MutableMap<String, String> = HashMap()
-            for ((headerName, headerValues) in responseHeaders) {
-                var headerAllowed = false
-                synchronized(this) {
-                    for (allowedHeader in allowedHeaders) {
-                        if (allowedHeader.equals(headerName, ignoreCase = true)) {
-                            headerAllowed = true
-                            break
-                        }
-                    }
-                }
-                if (!headerAllowed) {
-                    continue
-                }
-
-                if (headerValues != null && !headerValues.isEmpty()) {
-                    val headerValue = java.lang.String.join(", ", headerValues)
-                    headers[headerName.lowercase()] = headerValue.lowercase()
-                }
-            }
-            return headers
-        }
-
-        private fun shouldDispatchEvent(
-            data: ChunkDownloadData?,
-            eventType: String
-        ): Boolean {
-            if (data != null) {
-                requestSegmentDuration =
-                    if (data.requestMediaDuration == null || data.requestMediaDuration < 1000) {
-                        1000
-                    } else {
-                        data.requestMediaDuration
-                    }
-            }
-            val timeDiff = System.currentTimeMillis() - lastRequestSentAt
-            if (timeDiff > requestSegmentDuration) {
-                // Reset all stats
-                lastRequestSentAt = System.currentTimeMillis()
-                numberOfRequestCompletedBeaconsSentPerSegment = 0
-                numberOfRequestCancelBeaconsSentPerSegment = 0
-                numberOfRequestFailedBeaconsSentPerSegment = 0
-            }
-
-            when (eventType) {
-                REQUEST_COMPLETED -> numberOfRequestCompletedBeaconsSentPerSegment++
-                REQUEST_CANCELLED -> numberOfRequestCancelBeaconsSentPerSegment++
-                REQUEST_FAILED -> numberOfRequestFailedBeaconsSentPerSegment++
-            }
-
-            if (numberOfRequestCompletedBeaconsSentPerSegment > maxNumberOfEventsPerSegmentDuration
-                || numberOfRequestCancelBeaconsSentPerSegment > maxNumberOfEventsPerSegmentDuration
-                || numberOfRequestFailedBeaconsSentPerSegment > maxNumberOfEventsPerSegmentDuration
-            ) {
-                return false
-            }
-            return true
-        }
-    }
-
-
-    private fun schedulePulseEvents() {
-        if (isPulseScheduled.get()) return
-
-        isPulseScheduled.set(true)
-        Logger.log(TAG, "COROUTINE_START: scope=playerScope task=pulseLoop")
-        pulseJob = dispatcherScope.launch {
-            while (isPulseScheduled.get()) {
-                delay(PULSE_INTERVAL)
-                if (isPulseScheduled.get()) {
-                    withContext(Dispatchers.Main) {
-                        fastPixDataSDK?.dispatchEvent(PlayerEventType.pulse)
-                    }
-                }
-            }
-        }
-    }
-
-    private fun cancelPulseEvent() {
-        if (isPulseScheduled.get()) {
-            Logger.log(TAG, "COROUTINE_CANCELLED: scope=playerScope task=pulseLoop")
-            isPulseScheduled.set(false)
-            pulseJob?.cancel()
-        }
-    }
-
-
-    companion object {
-        private const val REQUEST_FAILED = "requestFailed"
-        private const val REQUEST_CANCELLED = "requestCanceled"
-        private const val REQUEST_COMPLETED = "requestCompleted"
-    }
+private fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
